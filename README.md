@@ -1,6 +1,6 @@
 # dsh-deepseek-chat
 
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）Web 界面的内嵌 DeepSeek 网页版插件。在会话视图标签环（对话 / 轨迹 / 音乐 / …）中注册「网页对话」标签页（order 30，位于「音乐」之后），把 [chat.deepseek.com](https://chat.deepseek.com/) 完整嵌进 DSH Web GUI。
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）Web 界面的内嵌 DeepSeek 网页版插件。在会话视图标签环（对话 / 轨迹 / …）中注册「网页对话」标签页（order 30——只是排序权重：**不依赖任何其它标签插件**，装了 [dsh-music-player](https://github.com/heshuren371/dsh-music-player) 时自然排在「音乐」之后，没装则紧跟内置标签），把 [chat.deepseek.com](https://chat.deepseek.com/) 完整嵌进 DSH Web GUI。
 
 ## 原理 / How it works
 
