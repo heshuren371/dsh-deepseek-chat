@@ -1,0 +1,54 @@
+{
+  "name": "@local/dsh-deepseek-chat",
+  "version": "0.1.1",
+  "description": "DSH Web 会话视图「网页对话」标签页：通过 Host 侧 loopback 反向代理把 DeepSeek 网页版（chat.deepseek.com）嵌进 DSH Web GUI。Written in TypeScript.",
+  "license": "MIT",
+  "author": "heshuren371",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/heshuren371/dsh-deepseek-chat.git"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "deepseek-chat",
+    "iframe",
+    "reverse-proxy"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "node scripts/build.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  }
+}
