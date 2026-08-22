@@ -14,13 +14,29 @@ chat.deepseek.com 带有 `content-security-policy: frame-ancestors 'none'`，浏
    - 静态资源本来就在 CDN（fe-static.deepseek.com），API 全是相对路径 `/api/v0/...`，无 WebSocket——整域代理即可完整工作。
 2. **客户端**：在 `conversation.view` 槽位注册「网页对话」标签，iframe 指向代理地址（从 `/dsh-deepseek-chat/config` 动态获取）。iframe 驻留全局单例容器，**切换标签页 / HMR 不会重新加载**（也不重复拉取 config），登录态与草稿全程保留。
 
-## 安装 / Install
+## 快速安装 / Quick Install
+
+前置条件：已安装 DSH 并能打开 Web 界面（<http://127.0.0.1:3080>）。
 
 ```bash
-dsh plugin --profile web add link:./dsh-deepseek-chat
+dsh plugin --profile web add github:heshuren371/dsh-deepseek-chat
 ```
 
 重启 `dsh web`，刷新浏览器——会话顶部标签环出现「网页对话」即成功。
+
+想锁定版本：`dsh plugin --profile web add github:heshuren371/dsh-deepseek-chat#v0.1.1`
+
+## 开发者安装（克隆 + link）
+
+```bash
+git clone https://github.com/heshuren371/dsh-deepseek-chat.git
+cd dsh-deepseek-chat && npm install && npm run build
+cd ..
+dsh plugin --profile web add link:./dsh-deepseek-chat
+```
+
+- link 方式不会自动构建，`npm run build` 必须做（产物 lib/ 也已随仓库提交，跳过构建通常也能跑）
+- 装配后**不要移动或删除克隆目录**——profile 通过链接指向这个位置
 
 ## 限制 / Limitations
 
