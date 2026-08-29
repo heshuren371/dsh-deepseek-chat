@@ -41,7 +41,7 @@ window.__ModuleLoader__.load({
     };
 
     const CSS = [
-      ".dshdc-root{box-sizing:border-box;width:100%;height:100%;min-height:0;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);flex-direction:column;display:flex;overflow:hidden}",
+      ".dshdc-root{box-sizing:border-box;width:100%;height:100%;min-height:0;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);flex-direction:column;display:flex;overflow:hidden;padding-bottom:calc(var(--dsh-composer-height,152px) + 16px)}", // 根节点声明 data-conversation-composer-overlay 后 composer 悬浮在底部：预留其高度（变量由 ConversationRoot 实时发布），避免遮挡提示条
       ".dshdc-root *{box-sizing:border-box}",
       ".dshdc-header{border-bottom:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);flex:none;align-items:center;gap:10px;min-height:44px;padding:0 14px;display:flex}",
       ".dshdc-title{font-size:14px;font-weight:600;flex:none}",
@@ -182,7 +182,7 @@ window.__ModuleLoader__.load({
         );
       }
 
-      return h("div", { className: "dshdc-root" },
+      return h("div", { className: "dshdc-root", "data-conversation-composer-overlay": "" },
         header,
         body,
         h("div", { className: "dshdc-notice" }, t("state.notice")),
