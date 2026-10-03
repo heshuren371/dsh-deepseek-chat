@@ -1,20 +1,14 @@
 /**
  * dsh Web 客户端运行时的环境声明。
  *
- * 客户端产物是经由浏览器模块系统（window.__ModuleLoader__）加载的
- * 普通脚本；require 是 loader 传给插件 factory 的参数，React 由运行时
- * 的外部模块表提供——与宿主内置插件遵循同一契约。
+ * 客户端产物是经由浏览器模块系统（window.__ModuleLoader__）加载的普通
+ * 脚本：插件把自己的 id 与 factory 交给 loader，宿主运行时调用 factory
+ * 拿到模块导出（apply / inject）后挂载到客户端 cordis 树上。
  */
 
 interface ModuleLoaderRegistration {
   id: string;
-  factory: (require: ModuleRequire) => unknown;
-}
-
-interface ModuleRequire {
-  (id: 'react'): typeof import('react');
-  (id: 'react-dom/client'): typeof import('react-dom/client');
-  (id: string): any;
+  factory: () => unknown;
 }
 
 interface ModuleLoader {

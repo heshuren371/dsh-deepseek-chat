@@ -1,6 +1,8 @@
 # dsh-deepseek-chat
 
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）Web 界面的内嵌 DeepSeek 网页版插件。在会话视图标签环（对话 / 轨迹 / …）中注册「网页对话」标签页（order 30——只是排序权重：**不依赖任何其它标签插件**，装了 [dsh-music-player](https://github.com/heshuren371/dsh-music-player) 时自然排在「音乐」之后，没装则紧跟内置标签），把 [chat.deepseek.com](https://chat.deepseek.com/) 完整嵌进 DSH Web GUI。
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）Web 界面的 DeepSeek 网页版插件：在 **DSH 窗口顶部中央**常驻一枚〔对话 | CHAT〕胶囊（做法参考 [dsh-synapse](https://github.com/liangmianya/dsh-synapse) 的视图切换器），点 CHAT 即**整窗口接管**，把 [chat.deepseek.com](https://chat.deepseek.com/) 完整铺进 DSH Web GUI；点「对话」原样回到 DSH。
+
+> v0.2.0 起不再注册会话视图标签页——插件**不会**出现在「对话 / 轨迹 / …」标签环里。
 
 ## 原理 / How it works
 
@@ -12,7 +14,11 @@ chat.deepseek.com 带有 `content-security-policy: frame-ancestors 'none'`，浏
    - 改写 shell HTML：去掉首屏两个 `<script>` 的 `crossorigin` + SRI `integrity`（CDN 只放行 deepseek.com 系 Origin，不换掉必触发「页面资源加载异常」）；字节本身不变，SRI 语义无损；
    - 其余响应体**原样透传**，SSE 流式补全逐块转发、无缓冲；上游 TLS keep-alive 连接池复用（热请求省掉整次握手，实测首请求 255ms → 后续 67ms）；本地 socket 关 Nagle，流式分片即达；
    - 静态资源本来就在 CDN（fe-static.deepseek.com），API 全是相对路径 `/api/v0/...`，无 WebSocket——整域代理即可完整工作。
-2. **客户端**：在 `conversation.view` 槽位注册「网页对话」标签，iframe 指向代理地址（从 `/dsh-deepseek-chat/config` 动态获取）。iframe 驻留全局单例容器，**切换标签页 / HMR 不会重新加载**（也不重复拉取 config），登录态与草稿全程保留。
+2. **客户端**：在 `document.body` 上挂一枚 `position:fixed` 的胶囊〔对话 | CHAT〕（z-index 501）与一个整窗口覆盖层（z-index 500，盖住全部三列含左侧会话栏）：
+   - 覆盖层不留任何条带：iframe 铺满整个窗口，界面上只剩四枚按钮——顶部中央的〔对话 \| CHAT〕胶囊，加右上角浮动的两枚图标按钮（刷新 ⟳ / 在浏览器打开 ↗）；浮动按钮自带实心底与投影，压在任何页面上都看得清，其 `aria-label` / `title` 保留完整中文名，读屏与悬停提示照旧；
+   - CHAT 模式给 `#root` 加 `inert`，隐藏的 DSH 界面不再能被 Tab / 快捷键误触；
+   - iframe 指向代理地址（从 `/dsh-deepseek-chat/config` 动态获取，**首次切到 CHAT 才拉取**）；
+   - iframe 是全局单例：第一次切到 CHAT 时创建并挂进覆盖层，之后**永不搬动**；切回「对话」只把覆盖层 `visibility:hidden`。iframe 一旦被移出文档，浏览器就会丢弃它的嵌套浏览上下文、再显示时整页重载（登录态虽在，草稿与滚动位置会丢）——只做隐身则布局尺寸不变，状态全程保留。
 
 ## 快速安装 / Quick Install
 
@@ -22,9 +28,9 @@ chat.deepseek.com 带有 `content-security-policy: frame-ancestors 'none'`，浏
 dsh plugin --profile web add github:heshuren371/dsh-deepseek-chat
 ```
 
-重启 `dsh web`，刷新浏览器——会话顶部标签环出现「网页对话」即成功。
+重启 `dsh web`，刷新浏览器——窗口顶部中央出现〔对话 | CHAT〕胶囊即成功。
 
-想锁定版本：`dsh plugin --profile web add github:heshuren371/dsh-deepseek-chat#v0.1.1`
+想锁定版本：`dsh plugin --profile web add github:heshuren371/dsh-deepseek-chat#v0.2.0`
 
 ## 开发者安装（克隆 + link）
 
@@ -41,6 +47,8 @@ dsh plugin --profile web add link:./dsh-deepseek-chat
 ## 限制 / Limitations
 
 - **第三方 OAuth 登录（Google 等）在 iframe 内不可用**（Google 同样禁止被嵌框）；请使用手机号 / 邮箱验证码登录，或先点「在浏览器打开」完成登录后再回来（同机 cookie 独立，需各自登录）。
+- CHAT 模式整窗口接管期间，被盖住的 DSH 界面**不可交互也不可见**：需要审批提示、任务进度或设置时，先点「对话」切回去（设置类弹窗 z-index 高于覆盖层，仍会浮在最上面）。
+- 右上角两枚浮动按钮压在页面之上，可能盖住 chat.deepseek.com 自己的顶部控件（如账户头像）；挪开只需停用 CHAT 模式或用快捷键切回「对话」。
 - 代理仅绑定 127.0.0.1，但本机任何进程都能访问该端口；它只转发公开的 chat.deepseek.com，不持有任何凭据（登录 cookie 存在你的浏览器里）。
 - 剥 CSP 是让嵌入可行的必要手段，仅限 loopback 使用，请勿把代理暴露到局域网。
 
@@ -60,12 +68,13 @@ dsh plugin --profile web add link:./dsh-deepseek-chat
 ## 开发 / Develop
 
 ```bash
-npm install   # 安装 esbuild / typescript（仅开发期）
-npm run build # 产出 lib/index.js + lib/client.js
+npm install    # 安装 esbuild / typescript（仅开发期）
+npm run build  # 产出 lib/index.js + lib/client.js
 npm run typecheck
+npm test       # jsdom 下跑 lib/client.js 的行为测试（胶囊 / 接管 / iframe 驻留）
 ```
 
-改完重启 `dsh web`（或用 dsh-super-injector 热重载该包）生效。
+改完重启 `dsh web` 生效（客户端产物刷新浏览器即可；新增/移除 bundle 必须重启宿主）。
 
 ## 卸载 / Uninstall
 

@@ -1,66 +1,127 @@
 /**
- * 「网页对话」客户端插件（TypeScript 源码）。
+ * CHAT 模式客户端插件（TypeScript 源码）。
  *
- * 构建为 lib/client.js（IIFE，React 保持外部引用），由 dsh 经
- * exports["./client"] 在 /plugins/<id>/client.js 提供。在会话视图
- * 标签环（conversation.view 槽位）注册「网页对话」标签，order 30，
- * 位于「音乐」（order 20）之后。
+ * 构建为 lib/client.js（IIFE，无框架依赖），由 dsh 经 exports["./client"]
+ * 在 /plugins/<id>/client.js 提供给浏览器运行时（window.__ModuleLoader__）。
  *
- * 视图本体是一个指向 Host 侧 loopback 反向代理的 iframe（代理整域
- * 转发 chat.deepseek.com 并剥离 frame-ancestors）。iframe 驻留全局
- * 单例容器：切换标签页 / HMR 只会重新挂接 DOM，不会重新加载页面，
- * 正在输入的草稿与登录态得以保留。
+ * 与旧版「会话视图标签页」不同，本版**不再占用** conversation.view 标签环
+ * （对话 / 轨迹 / …），而是在 DSH 窗口顶部中央挂一枚常驻胶囊
+ * 〔对话 | CHAT〕（做法参考 dsh-synapse 的视图切换器）：
+ *
+ *  - 对话：原样的 DSH 界面，胶囊浮在顶部中央；
+ *  - CHAT：整窗口覆盖层接管（连左侧会话栏一起盖住），把指向 Host 侧
+ *    loopback 反向代理的 iframe 铺满整个可视区、不占任何横向条带；界面上
+ *    只剩四枚按钮——顶部中央的〔对话 | CHAT〕胶囊，与右上角两枚浮动图标
+ *    按钮（刷新 ⟳ / 在浏览器打开 ↗）。没有工具条、没有说明文案。
+ *
+ * iframe 是全局单例：第一次切到 CHAT 才创建并挂进覆盖层，之后**永不搬动**。
+ * 切回「对话」只是把覆盖层 `visibility:hidden`——iframe 一旦被移出文档，
+ * 浏览器就会丢弃它的嵌套浏览上下文、再显示时整页重载（登录态虽在，草稿与
+ * 滚动位置会丢）。只做隐身则布局尺寸不变，状态全程保留。HMR 重挂同理。
  */
 window.__ModuleLoader__.load({
   id: "@local/dsh-deepseek-chat",
-  factory: (require) => {
-    const React = require("react");
-    const h = React.createElement;
-    const { useEffect, useRef, useState } = React;
-
+  factory: () => {
     const NS = "dsh-deepseek-chat";
     const CONFIG_URL = "/dsh-deepseek-chat/config";
 
     const zh = {
-      "view.webchat": "网页对话",
+      "mode.switch": "视图切换",
+      "mode.dsh": "对话",
+      "mode.chat": "CHAT",
       "action.reload": "刷新",
       "action.openExternal": "在浏览器打开",
       "state.loading": "正在连接 DeepSeek 网页版…",
       "state.error": "无法连接本地代理服务",
       "state.retry": "重试",
-      "state.notice": "由本地代理嵌入 chat.deepseek.com；第三方账号登录（Google 等）请在浏览器中完成",
     };
     const en = {
-      "view.webchat": "Web Chat",
+      "mode.switch": "View switch",
+      "mode.dsh": "Conversation",
+      "mode.chat": "CHAT",
       "action.reload": "Reload",
       "action.openExternal": "Open in Browser",
       "state.loading": "Connecting to DeepSeek Web…",
       "state.error": "Cannot reach the local proxy",
       "state.retry": "Retry",
-      "state.notice": "Embedded via a local proxy to chat.deepseek.com; sign in with third-party accounts (e.g. Google) in a browser tab",
     };
 
+    /**
+     * 层级取值：DSH 帧内元素最高 z-index 20，账户提示 40，引导页 900，
+     * 设置弹窗 1000。覆盖层取 500——盖住整个应用，但把模态弹窗留给 DSH；
+     * 胶囊 501 永远浮在覆盖层之上，保证随时能切回「对话」。
+     */
     const CSS = [
-      ".dshdc-root{box-sizing:border-box;width:100%;height:100%;min-height:0;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);flex-direction:column;display:flex;overflow:hidden;padding-bottom:calc(var(--dsh-composer-height,152px) + 16px)}", // 根节点声明 data-conversation-composer-overlay 后 composer 悬浮在底部：预留其高度（变量由 ConversationRoot 实时发布），避免遮挡提示条
-      ".dshdc-root *{box-sizing:border-box}",
-      ".dshdc-header{border-bottom:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);flex:none;align-items:center;gap:10px;min-height:44px;padding:0 14px;display:flex}",
-      ".dshdc-title{font-size:14px;font-weight:600;flex:none}",
-      ".dshdc-sub{min-width:0;color:var(--dsw-alias-label-tertiary);font-size:11px;text-overflow:ellipsis;white-space:nowrap;flex:1;overflow:hidden}",
-      ".dshdc-btn{cursor:pointer;height:26px;color:var(--dsw-alias-label-primary);border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-l1);border-radius:7px;flex:none;align-items:center;gap:5px;padding:0 10px;font:inherit;font-size:12px;display:inline-flex}",
+      ".dshdc-switch{position:fixed;z-index:501;top:10px;left:50%;transform:translateX(-50%);display:flex;gap:2px;padding:3px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;background:var(--dsw-alias-bg-layer-1);box-shadow:0 1px 2px #00000012,0 6px 18px #00000012}",
+      ".dshdc-seg{display:inline-flex;align-items:center;height:26px;padding:0 12px;border:0;border-radius:999px;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;font-weight:600;line-height:1;white-space:nowrap;cursor:pointer}",
+      ".dshdc-seg:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}",
+      ".dshdc-seg[aria-pressed='true'],.dshdc-seg[aria-pressed='true']:hover{background:var(--dsw-alias-button-contrast-fill);color:var(--dsw-alias-label-primary-foreground)}",
+      ".dshdc-seg:focus-visible,.dshdc-btn:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}",
+      ".dshdc-overlay{position:fixed;z-index:500;inset:0;display:flex;flex-direction:column;background:var(--dsw-alias-bg-layer-1)}",
+      // 收起只用 visibility:hidden——iframe 一旦被移出文档（哪怕是挪到 body），
+      // 浏览器就会丢弃它的嵌套浏览上下文、下次显示时整页重载。只做隐身则
+      // 布局尺寸不变，登录态、草稿与滚动位置全都留着。
+      ".dshdc-overlay[data-idle]{visibility:hidden;pointer-events:none}",
+      // 没有工具条：按钮组直接浮在舞台右上角，与顶部胶囊同高（10px + 34px 的
+      // 行高，让 26px 的按钮正好与胶囊内的分段水平对齐）。z-index 501 跟着
+      // 胶囊一层，压住 500 的覆盖层；覆盖层隐身时它随祖先一起隐藏。
+      ".dshdc-actions{position:fixed;z-index:501;top:10px;right:12px;height:34px;display:flex;align-items:center;gap:8px}",
+      ".dshdc-btn{height:26px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:7px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer}",
+      // 只留图形：按钮内容是一枚 svg，文字交给 aria-label / title。按钮浮在
+      // chat.deepseek.com 的浅色页面上，所以自带实心底与投影（同胶囊一套），
+      // 保证图标在任何底色上都看得见。
+      ".dshdc-iconbtn{display:inline-flex;align-items:center;justify-content:center;width:26px;padding:0;background:var(--dsw-alias-bg-layer-1);box-shadow:0 1px 2px #00000012,0 6px 18px #00000012}",
+      ".dshdc-iconbtn svg{display:block;width:14px;height:14px}",
       ".dshdc-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}",
       ".dshdc-btn:disabled{cursor:not-allowed;opacity:.45}",
-      ".dshdc-frameWrap{position:relative;min-height:0;flex:1;background:#fff}",
-      ".dshdc-frame{position:absolute;inset:0;width:100%;height:100%;border:0;display:block}",
-      ".dshdc-overlay{position:absolute;inset:0;z-index:1;color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-layer-1);flex-direction:column;justify-content:center;align-items:center;gap:12px;display:flex}",
+      ".dshdc-stage{position:relative;flex:1;min-height:0;background:#fff}",
+      ".dshdc-frameWrap{position:absolute;inset:0;width:100%;height:100%}",
+      ".dshdc-frame{display:block;width:100%;height:100%;border:0}",
+      ".dshdc-state{position:absolute;inset:0;z-index:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-layer-1)}",
+      ".dshdc-state[hidden]{display:none}",
       ".dshdc-spinner{width:22px;height:22px;border:2px solid var(--dsw-alias-border-l2);border-top-color:var(--dsw-alias-state-business-primary);border-radius:50%;animation:dshdc-spin .8s linear infinite}",
       "@keyframes dshdc-spin{to{transform:rotate(360deg)}}",
-      ".dshdc-notice{border-top:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-caption);background:var(--dsw-alias-bg-layer-1);flex:none;padding:4px 14px;font-size:11px;text-align:center}",
     ].join("\n");
 
+    /** 创建元素并可选地设置 class（属性一律由调用方显式设置）。 */
+    function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string): HTMLElementTagNameMap[K] {
+      const node = document.createElement(tag);
+      if (className !== undefined) node.className = className;
+      return node;
+    }
+
+    const SVG_NS = "http://www.w3.org/2000/svg";
+
     /**
-     * 全局驻留的 iframe 宿主。wrap 常驻 document.body（不可见），
-     * 标签页挂载时把 wrap 搬进自己的容器，卸载时搬回 body——
-     * iframe 本身从不重建，页面状态（登录、草稿、滚动）全程保留。
+     * 造一枚 24 格线稿图标：stroke 用 currentColor，自动跟随按钮的前景色与
+     * disabled 的透明度；aria-hidden 让读屏只念按钮的 aria-label。
+     */
+    function icon(paths: string[]): SVGSVGElement {
+      const svg = document.createElementNS(SVG_NS, "svg");
+      svg.setAttribute("viewBox", "0 0 24 24");
+      svg.setAttribute("fill", "none");
+      svg.setAttribute("stroke", "currentColor");
+      svg.setAttribute("stroke-width", "2");
+      svg.setAttribute("stroke-linecap", "round");
+      svg.setAttribute("stroke-linejoin", "round");
+      svg.setAttribute("aria-hidden", "true");
+      svg.setAttribute("focusable", "false");
+      for (const d of paths) {
+        const path = document.createElementNS(SVG_NS, "path");
+        path.setAttribute("d", d);
+        svg.appendChild(path);
+      }
+      return svg;
+    }
+
+    /** 刷新 ⟳ / 在浏览器打开 ↗（线稿几何取自 Lucide，MIT）。 */
+    const ICON_RELOAD = ["M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8", "M21 3v5h-5"];
+    const ICON_EXTERNAL = ["M15 3h6v6", "M10 14 21 3", "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"];
+
+    /**
+     * 全局驻留的 iframe：一旦创建就永远留在覆盖层舞台里，切换模式只改
+     * 覆盖层的可见性，绝不搬动 DOM——iframe 被移出文档会让浏览器丢弃它的
+     * 嵌套浏览上下文，再插回来等于整页重载（登录态还在，草稿与滚动没了）。
      */
     interface Persistent {
       wrap: HTMLDivElement;
@@ -68,150 +129,232 @@ window.__ModuleLoader__.load({
       url: string;
     }
     let persistent: Persistent | null = null;
+    /** 首屏是否已 load 过：决定覆盖层里是否还盖着 loading。 */
+    let frameLoaded = false;
+    /** 当前 effect 实例的重绘钩子（HMR 后指向最新实例）。 */
+    let notify: (() => void) | null = null;
 
+    /** 建好元素但不入文档——由 attach() 一次性挂进舞台，避免多余的一次搬动。 */
     function ensurePersistent(url: string): Persistent {
       if (persistent !== null) return persistent;
-      const wrap = document.createElement("div");
-      wrap.style.cssText = "position:fixed;left:-10000px;top:0;width:1px;height:1px;overflow:hidden";
-      const frame = document.createElement("iframe");
-      frame.className = "dshdc-frame";
+      const wrap = el("div", "dshdc-frameWrap");
+      const frame = el("iframe", "dshdc-frame");
       frame.setAttribute("allow", "clipboard-read; clipboard-write");
+      frame.setAttribute("title", "chat.deepseek.com");
       frame.src = url;
+      frame.addEventListener("load", () => {
+        frameLoaded = true;
+        notify?.();
+      });
       wrap.appendChild(frame);
-      document.body.appendChild(wrap);
       persistent = { wrap, frame, url };
       return persistent;
     }
 
-    function detachPersistent(): void {
-      if (persistent === null) return;
-      persistent.wrap.style.cssText = "position:fixed;left:-10000px;top:0;width:1px;height:1px;overflow:hidden";
-      if (persistent.wrap.parentElement !== document.body) document.body.appendChild(persistent.wrap);
-    }
+    /** 覆盖模式只保留 locale。 */
+    const inject = ["locale"];
 
-    function ChatView() {
-      // 驻留 iframe 已存在时（标签页来回切换 / HMR）：直接复用其地址，
-      // 不再请求 config，也不闪 loading 遮罩。
-      const [status, setStatus] = useState<"loading" | "ready" | "error">(() => persistent !== null ? "ready" : "loading");
-      const [url, setUrl] = useState<string>(() => persistent?.url ?? "");
-      const [frameLoaded, setFrameLoaded] = useState(() => persistent !== null);
-      const [reloadKey, setReloadKey] = useState(0);
-      const stageRef = useRef<HTMLDivElement | null>(null);
-      const t: (key: string) => string = (ChatView as any).t ?? ((key: string) => key);
-
-      useEffect(() => {
-        if (persistent !== null) return; // 已有驻留实例：跳过 config 往返
-        let cancelled = false;
-        setStatus("loading");
-        fetch(CONFIG_URL, { cache: "no-store" })
-          .then((res) => {
-            if (!res.ok) throw new Error("config http " + res.status);
-            return res.json();
-          })
-          .then((json: { url?: string }) => {
-            if (cancelled) return;
-            if (typeof json.url !== "string" || json.url.length === 0) throw new Error("config missing url");
-            setUrl(json.url);
-            setStatus("ready");
-          })
-          .catch(() => {
-            if (!cancelled) setStatus("error");
-          });
-        return () => { cancelled = true; };
-      }, [reloadKey]);
-
-      useEffect(() => {
-        if (status !== "ready") return;
-        const stage = stageRef.current;
-        if (stage === null) return;
-        const entry = ensurePersistent(url);
-        entry.wrap.style.cssText = "position:absolute;inset:0;width:100%;height:100%";
-        stage.appendChild(entry.wrap);
-        const onLoad = () => setFrameLoaded(true);
-        entry.frame.addEventListener("load", onLoad);
-        if (entry.frame.contentWindow !== null && (entry.frame.contentWindow as any).document?.readyState === "complete") {
-          setFrameLoaded(true);
-        }
-        return () => {
-          entry.frame.removeEventListener("load", onLoad);
-          detachPersistent();
-        };
-      }, [status, url, reloadKey]);
-
-      const header = h("div", { className: "dshdc-header" },
-        h("span", { className: "dshdc-title" }, t("view.webchat")),
-        h("span", { className: "dshdc-sub" }, "chat.deepseek.com"),
-        h("button", {
-          type: "button",
-          className: "dshdc-btn",
-          disabled: status !== "ready",
-          onClick: () => {
-            // 优先原地 reload；代理地址变了则整体重建驻留 iframe
-            if (persistent !== null && persistent.url === url) {
-              setFrameLoaded(false);
-              persistent.frame.contentWindow?.location.reload();
-            } else if (persistent !== null) {
-              persistent.frame.src = url;
-              persistent.url = url;
-              setFrameLoaded(false);
-            } else {
-              setReloadKey((n: number) => n + 1);
-            }
-          },
-        }, t("action.reload")),
-        h("button", {
-          type: "button",
-          className: "dshdc-btn",
-          disabled: status !== "ready",
-          onClick: () => window.open(url, "_blank", "noopener"),
-        }, t("action.openExternal")),
-      );
-
-      let body;
-      if (status === "error") {
-        body = h("div", { className: "dshdc-overlay", style: { position: "relative", flex: "1" } },
-          h("div", null, t("state.error")),
-          h("button", { type: "button", className: "dshdc-btn", onClick: () => setReloadKey((n: number) => n + 1) }, t("state.retry")),
-        );
-      } else {
-        body = h("div", { className: "dshdc-frameWrap", ref: stageRef },
-          (!frameLoaded || status === "loading") && h("div", { className: "dshdc-overlay" },
-            h("div", { className: "dshdc-spinner" }),
-            h("div", null, t("state.loading")),
-          ),
-        );
-      }
-
-      return h("div", { className: "dshdc-root", "data-conversation-composer-overlay": "" },
-        header,
-        body,
-        h("div", { className: "dshdc-notice" }, t("state.notice")),
-      );
-    }
-
-    const inject = ["slots", "locale"];
-    function apply(ctx: any) {
+    function apply(ctx: any): void {
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), "deepseek-chat: dictionaries");
-      const t = ctx.locale.bind(NS);
-      (ChatView as any).t = t;
+      const t: (key: string) => string = ctx.locale.bind(NS);
+
       ctx.effect(() => {
-        const tag = document.createElement("style");
-        tag.dataset.plugin = "@local/dsh-deepseek-chat";
-        tag.dataset.pluginCss = NS;
-        tag.textContent = CSS;
-        document.head.appendChild(tag);
-        return () => tag.remove();
-      }, "deepseek-chat: styles");
-      ctx.slots.inject("conversation.view", () => ctx.slots.register({
-        name: "conversation.view",
-        id: "webchat",
-        order: 30,
-        locale: NS,
-        label: () => t("view.webchat"),
-        inject: () => ({}),
-      }, ChatView));
+        let disposed = false;
+        let active = false;
+        let status: "idle" | "loading" | "ready" | "error" = "idle";
+        let url = "";
+
+        const style = document.createElement("style");
+        style.dataset.plugin = "@local/dsh-deepseek-chat";
+        style.dataset.pluginCss = NS;
+        style.textContent = CSS;
+        document.head.appendChild(style);
+
+        const host = el("div", "dshdc-host");
+
+        // ---- 顶部胶囊：〔对话 | CHAT〕 ----
+        const switcher = el("div", "dshdc-switch");
+        switcher.setAttribute("role", "group");
+        switcher.setAttribute("aria-label", t("mode.switch"));
+        const dshSeg = el("button", "dshdc-seg");
+        dshSeg.type = "button";
+        dshSeg.textContent = t("mode.dsh");
+        const chatSeg = el("button", "dshdc-seg");
+        chatSeg.type = "button";
+        chatSeg.textContent = t("mode.chat");
+        switcher.append(dshSeg, chatSeg);
+
+        // ---- 全窗口覆盖层 ----
+        const overlay = el("div", "dshdc-overlay");
+        overlay.dataset.idle = "";
+
+        const actions = el("div", "dshdc-actions");
+        const reloadBtn = el("button", "dshdc-btn dshdc-iconbtn");
+        reloadBtn.type = "button";
+        reloadBtn.title = t("action.reload");
+        reloadBtn.setAttribute("aria-label", t("action.reload"));
+        reloadBtn.append(icon(ICON_RELOAD));
+        const externalBtn = el("button", "dshdc-btn dshdc-iconbtn");
+        externalBtn.type = "button";
+        externalBtn.title = t("action.openExternal");
+        externalBtn.setAttribute("aria-label", t("action.openExternal"));
+        externalBtn.append(icon(ICON_EXTERNAL));
+        actions.append(reloadBtn, externalBtn);
+
+        // 覆盖层里只有舞台：没有工具条占位，iframe 直接铺满整个窗口，
+        // 两枚图标按钮以 fixed 浮在右上角。
+        const stage = el("div", "dshdc-stage");
+        const state = el("div", "dshdc-state");
+        const spinner = el("div", "dshdc-spinner");
+        const stateText = el("div");
+        const retryBtn = el("button", "dshdc-btn");
+        retryBtn.type = "button";
+        retryBtn.textContent = t("state.retry");
+        state.append(spinner, stateText, retryBtn);
+        stage.append(state);
+
+        overlay.append(actions, stage);
+        host.append(switcher, overlay);
+        document.body.append(host);
+
+        /**
+         * DSH 应用根节点：覆盖模式下用 inert 屏蔽被盖住的界面，否则 Tab
+         * 会走进不可见的按钮、快捷键也会落到隐藏的会话上。优先 #root，
+         * 退化为「body 里第一个既不是插件节点也不是 script/style 的元素」。
+         */
+        const rootElement = (): HTMLElement | null => {
+          const byId = document.getElementById("root");
+          if (byId !== null) return byId;
+          for (const child of Array.from(document.body.children)) {
+            if (!(child instanceof HTMLElement)) continue;
+            if (child === host || child.classList.contains("dshdc-frameWrap")) continue;
+            const tag = child.tagName;
+            if (tag === "SCRIPT" || tag === "STYLE" || tag === "LINK") continue;
+            return child;
+          }
+          return null;
+        };
+        const setInert = (value: boolean): void => {
+          if (!("inert" in HTMLElement.prototype)) return;
+          const root = rootElement();
+          if (root !== null) root.inert = value;
+        };
+
+        const render = (): void => {
+          dshSeg.setAttribute("aria-pressed", String(!active));
+          chatSeg.setAttribute("aria-pressed", String(active));
+          if (active) delete overlay.dataset.idle;
+          else overlay.dataset.idle = "";
+          const pending = active && (status !== "ready" || !frameLoaded);
+          state.hidden = !pending;
+          spinner.hidden = status !== "loading" && status !== "ready";
+          stateText.textContent = status === "error" ? t("state.error") : t("state.loading");
+          retryBtn.hidden = status !== "error";
+          reloadBtn.disabled = status !== "ready";
+          externalBtn.disabled = status !== "ready";
+        };
+
+        /**
+         * 把驻留 iframe 挂进覆盖层舞台（排在 loading 遮罩之前，被它盖住）。
+         * 只挂这一次：parentElement 已经是本舞台就什么都不做——重复挂载
+         * 等于把 iframe 挪出文档，会触发整页重载。
+         */
+        const attach = (): void => {
+          if (status !== "ready" || url === "") return;
+          const entry = ensurePersistent(url);
+          if (entry.wrap.parentElement !== stage) stage.insertBefore(entry.wrap, state);
+        };
+
+        const load = (): void => {
+          if (disposed || status === "loading" || status === "ready") return;
+          status = "loading";
+          render();
+          fetch(CONFIG_URL, { cache: "no-store" })
+            .then((res) => {
+              if (!res.ok) throw new Error("config http " + res.status);
+              return res.json();
+            })
+            .then((json: { url?: string }) => {
+              if (disposed) return;
+              if (typeof json.url !== "string" || json.url.length === 0) throw new Error("config missing url");
+              url = json.url;
+              status = "ready";
+              render();
+              attach();
+            })
+            .catch(() => {
+              if (disposed) return;
+              status = "error";
+              render();
+            });
+        };
+
+        const enter = (): void => {
+          if (active) return;
+          active = true;
+          setInert(true);
+          if (status === "ready") attach();
+          else load();
+          render();
+        };
+
+        const leave = (): void => {
+          if (!active) return;
+          active = false;
+          setInert(false);
+          render();
+        };
+
+        const onReload = (): void => {
+          const entry = persistent;
+          if (entry === null) {
+            load();
+            return;
+          }
+          // 代理地址变了（重启后换了端口）就整体换 src，否则原地 reload
+          if (entry.url !== url) {
+            entry.url = url;
+            frameLoaded = false;
+            entry.frame.src = url;
+            render();
+            return;
+          }
+          entry.frame.contentWindow?.location.reload();
+        };
+
+        const onExternal = (): void => {
+          if (url !== "") window.open(url, "_blank", "noopener");
+        };
+        const onKeyDown = (event: KeyboardEvent): void => {
+          // iframe 内的按键不会冒泡到这里，仅在焦点还在宿主页面时生效
+          if (event.key === "Escape" && active) leave();
+        };
+
+        dshSeg.addEventListener("click", leave);
+        chatSeg.addEventListener("click", enter);
+        reloadBtn.addEventListener("click", onReload);
+        retryBtn.addEventListener("click", load);
+        externalBtn.addEventListener("click", onExternal);
+        window.addEventListener("keydown", onKeyDown);
+        notify = render;
+        render();
+
+        return () => {
+          disposed = true;
+          notify = null;
+          dshSeg.removeEventListener("click", leave);
+          chatSeg.removeEventListener("click", enter);
+          reloadBtn.removeEventListener("click", onReload);
+          retryBtn.removeEventListener("click", load);
+          externalBtn.removeEventListener("click", onExternal);
+          window.removeEventListener("keydown", onKeyDown);
+          setInert(false);
+          host.remove();
+          style.remove();
+        };
+      }, "deepseek-chat: chat mode");
     }
 
     return { apply, inject };
-  }
+  },
 });
