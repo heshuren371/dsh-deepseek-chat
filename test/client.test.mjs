@@ -103,7 +103,7 @@ test('顶部胶囊取代会话视图标签环', () => {
   assert.equal(app.doc.querySelector('.dshdc-hint'), null, '不再有说明文案')
   assert.equal(app.doc.querySelector('.dshdc-bar'), null, '工具条本身也去掉，不占任何横向条带')
   assert.equal(app.doc.querySelector('.dshdc-actions').textContent, '', '浮动按钮组不含任何文字')
-  assert.match(css, /\.dshdc-actions\{position:fixed;z-index:501;top:10px;right:12px/, '按钮组浮在右上角、与胶囊同层')
+  assert.match(css, /\.dshdc-actions\{position:fixed;z-index:501;top:10px;right:46px/, '刷新浮在右上角、与胶囊同层，且钉在原格不贴边')
   assert.doesNotMatch(css, /\.dshdc-hint/, '说明文案的样式一并删掉')
   assert.doesNotMatch(css, /\.dshdc-bar/, '工具条的样式一并删掉')
 
@@ -177,25 +177,34 @@ test('config 失败：覆盖层给出错误与重试', async () => {
   assert.equal(app.retry().disabled, false)
 })
 
-test('浮动图标按钮：只有图标，文字进 aria-label', async () => {
+test('刷新按钮：只有图标，文字进 aria-label', async () => {
   const app = mount()
   const [, chat] = app.segments()
   chat.click()
   await flush()
 
   const buttons = [...app.doc.querySelectorAll('.dshdc-actions .dshdc-btn.dshdc-iconbtn')]
-  assert.equal(buttons.length, 2)
-  assert.deepEqual(buttons.map(node => node.getAttribute('aria-label')), ['刷新', '在浏览器打开'])
-  assert.deepEqual(buttons.map(node => node.getAttribute('title')), ['刷新', '在浏览器打开'])
-  assert.deepEqual(buttons.map(node => node.textContent), ['', ''], '按钮里不再有任何文字')
-  assert.deepEqual(buttons.map(node => node.querySelectorAll('svg').length), [1, 1], '每个按钮一枚 svg 图标')
+  assert.deepEqual(buttons.map(node => node.getAttribute('aria-label')), ['刷新'])
+  assert.deepEqual(buttons.map(node => node.getAttribute('title')), ['刷新'])
+  assert.deepEqual(buttons.map(node => node.textContent), [''], '按钮里没有任何文字')
+  assert.deepEqual(buttons.map(node => node.querySelectorAll('svg').length), [1], '按钮里是一枚 svg 图标')
   assert.equal(buttons[0].disabled, false)
-
-  buttons[1].click()
-  assert.deepEqual(app.opened, [[PROXY_URL, '_blank', 'noopener']])
 
   buttons[0].click() // 原地 reload：jsdom 会记一条 not-implemented，但不能抛
   assert.equal(app.frame(), app.doc.querySelector('.dshdc-frame'))
+})
+
+test('「在浏览器打开」整枚删除：不再有第二枚按钮，也不再开新窗口', async () => {
+  const app = mount()
+  const [, chat] = app.segments()
+  chat.click()
+  await flush()
+
+  const buttons = [...app.doc.querySelectorAll('.dshdc-actions .dshdc-btn')]
+  assert.equal(buttons.length, 1, '右上角只剩一枚按钮')
+  assert.equal(buttons[0].getAttribute('aria-label'), '刷新', '留下的必须是刷新')
+  assert.equal(app.dictionary['action.openExternal'], undefined, '「在浏览器打开」的文案也从字典里删掉')
+  assert.deepEqual(app.opened, [], '已经没有会调用 window.open 的路径')
 })
 
 test('Esc 退出 CHAT 模式', async () => {

@@ -11,8 +11,12 @@
  *  - 对话：原样的 DSH 界面，胶囊浮在顶部中央；
  *  - CHAT：整窗口覆盖层接管（连左侧会话栏一起盖住），把指向 Host 侧
  *    loopback 反向代理的 iframe 铺满整个可视区、不占任何横向条带；界面上
- *    只剩四枚按钮——顶部中央的〔对话 | CHAT〕胶囊，与右上角两枚浮动图标
- *    按钮（刷新 ⟳ / 在浏览器打开 ↗）。没有工具条、没有说明文案。
+ *    只剩三枚按钮——顶部中央的〔对话 | CHAT〕胶囊，与右上角一枚浮动图标
+ *    按钮（刷新 ⟳）。没有工具条、没有说明文案。
+ *
+ *    右上角刻意只放「刷新」：原先并排的「在浏览器打开」正好压在
+ *    chat.deepseek.com 自己的「分享」按钮上，已整枚删除（连同 window.open
+ *    与对应文案）。删掉后刷新按钮**原地不动**——见 .dshdc-actions 的 right 值。
  *
  * iframe 是全局单例：第一次切到 CHAT 才创建并挂进覆盖层，之后**永不搬动**。
  * 切回「对话」只是把覆盖层 `visibility:hidden`——iframe 一旦被移出文档，
@@ -30,7 +34,6 @@ window.__ModuleLoader__.load({
       "mode.dsh": "对话",
       "mode.chat": "CHAT",
       "action.reload": "刷新",
-      "action.openExternal": "在浏览器打开",
       "state.loading": "正在连接 DeepSeek 网页版…",
       "state.error": "无法连接本地代理服务",
       "state.retry": "重试",
@@ -40,7 +43,6 @@ window.__ModuleLoader__.load({
       "mode.dsh": "Conversation",
       "mode.chat": "CHAT",
       "action.reload": "Reload",
-      "action.openExternal": "Open in Browser",
       "state.loading": "Connecting to DeepSeek Web…",
       "state.error": "Cannot reach the local proxy",
       "state.retry": "Retry",
@@ -62,10 +64,14 @@ window.__ModuleLoader__.load({
       // 浏览器就会丢弃它的嵌套浏览上下文、下次显示时整页重载。只做隐身则
       // 布局尺寸不变，登录态、草稿与滚动位置全都留着。
       ".dshdc-overlay[data-idle]{visibility:hidden;pointer-events:none}",
-      // 没有工具条：按钮组直接浮在舞台右上角，与顶部胶囊同高（10px + 34px 的
-      // 行高，让 26px 的按钮正好与胶囊内的分段水平对齐）。z-index 501 跟着
+      // 没有工具条：刷新按钮直接浮在舞台右上角，与顶部胶囊同高（10px + 34px
+      // 的行高，让 26px 的按钮正好与胶囊内的分段水平对齐）。z-index 501 跟着
       // 胶囊一层，压住 500 的覆盖层；覆盖层隐身时它随祖先一起隐藏。
-      ".dshdc-actions{position:fixed;z-index:501;top:10px;right:12px;height:34px;display:flex;align-items:center;gap:8px}",
+      //
+      // right 取 46px 而不是贴边的 12px：两枚按钮并排时刷新在「右起 46~72px」
+      // 这一格，右边的「在浏览器打开」删掉后，必须把这一格钉住，否则刷新会滑
+      // 到贴边处、改成去压 chat.deepseek.com 的「分享」按钮。
+      ".dshdc-actions{position:fixed;z-index:501;top:10px;right:46px;height:34px;display:flex;align-items:center}",
       ".dshdc-btn{height:26px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:7px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer}",
       // 只留图形：按钮内容是一枚 svg，文字交给 aria-label / title。按钮浮在
       // chat.deepseek.com 的浅色页面上，所以自带实心底与投影（同胶囊一套），
@@ -114,9 +120,8 @@ window.__ModuleLoader__.load({
       return svg;
     }
 
-    /** 刷新 ⟳ / 在浏览器打开 ↗（线稿几何取自 Lucide，MIT）。 */
+    /** 刷新 ⟳（线稿几何取自 Lucide，MIT）。 */
     const ICON_RELOAD = ["M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8", "M21 3v5h-5"];
-    const ICON_EXTERNAL = ["M15 3h6v6", "M10 14 21 3", "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"];
 
     /**
      * 全局驻留的 iframe：一旦创建就永远留在覆盖层舞台里，切换模式只改
@@ -194,15 +199,10 @@ window.__ModuleLoader__.load({
         reloadBtn.title = t("action.reload");
         reloadBtn.setAttribute("aria-label", t("action.reload"));
         reloadBtn.append(icon(ICON_RELOAD));
-        const externalBtn = el("button", "dshdc-btn dshdc-iconbtn");
-        externalBtn.type = "button";
-        externalBtn.title = t("action.openExternal");
-        externalBtn.setAttribute("aria-label", t("action.openExternal"));
-        externalBtn.append(icon(ICON_EXTERNAL));
-        actions.append(reloadBtn, externalBtn);
+        actions.append(reloadBtn);
 
         // 覆盖层里只有舞台：没有工具条占位，iframe 直接铺满整个窗口，
-        // 两枚图标按钮以 fixed 浮在右上角。
+        // 刷新按钮以 fixed 浮在右上角（刻意避开 chat.deepseek.com 的「分享」）。
         const stage = el("div", "dshdc-stage");
         const state = el("div", "dshdc-state");
         const spinner = el("div", "dshdc-spinner");
@@ -251,7 +251,6 @@ window.__ModuleLoader__.load({
           stateText.textContent = status === "error" ? t("state.error") : t("state.loading");
           retryBtn.hidden = status !== "error";
           reloadBtn.disabled = status !== "ready";
-          externalBtn.disabled = status !== "ready";
         };
 
         /**
@@ -322,9 +321,6 @@ window.__ModuleLoader__.load({
           entry.frame.contentWindow?.location.reload();
         };
 
-        const onExternal = (): void => {
-          if (url !== "") window.open(url, "_blank", "noopener");
-        };
         const onKeyDown = (event: KeyboardEvent): void => {
           // iframe 内的按键不会冒泡到这里，仅在焦点还在宿主页面时生效
           if (event.key === "Escape" && active) leave();
@@ -334,7 +330,6 @@ window.__ModuleLoader__.load({
         chatSeg.addEventListener("click", enter);
         reloadBtn.addEventListener("click", onReload);
         retryBtn.addEventListener("click", load);
-        externalBtn.addEventListener("click", onExternal);
         window.addEventListener("keydown", onKeyDown);
         notify = render;
         render();
@@ -346,7 +341,6 @@ window.__ModuleLoader__.load({
           chatSeg.removeEventListener("click", enter);
           reloadBtn.removeEventListener("click", onReload);
           retryBtn.removeEventListener("click", load);
-          externalBtn.removeEventListener("click", onExternal);
           window.removeEventListener("keydown", onKeyDown);
           setInert(false);
           host.remove();

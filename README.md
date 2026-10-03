@@ -15,7 +15,7 @@ chat.deepseek.com 带有 `content-security-policy: frame-ancestors 'none'`，浏
    - 其余响应体**原样透传**，SSE 流式补全逐块转发、无缓冲；上游 TLS keep-alive 连接池复用（热请求省掉整次握手，实测首请求 255ms → 后续 67ms）；本地 socket 关 Nagle，流式分片即达；
    - 静态资源本来就在 CDN（fe-static.deepseek.com），API 全是相对路径 `/api/v0/...`，无 WebSocket——整域代理即可完整工作。
 2. **客户端**：在 `document.body` 上挂一枚 `position:fixed` 的胶囊〔对话 | CHAT〕（z-index 501）与一个整窗口覆盖层（z-index 500，盖住全部三列含左侧会话栏）：
-   - 覆盖层不留任何条带：iframe 铺满整个窗口，界面上只剩四枚按钮——顶部中央的〔对话 \| CHAT〕胶囊，加右上角浮动的两枚图标按钮（刷新 ⟳ / 在浏览器打开 ↗）；浮动按钮自带实心底与投影，压在任何页面上都看得清，其 `aria-label` / `title` 保留完整中文名，读屏与悬停提示照旧；
+   - 覆盖层不留任何条带：iframe 铺满整个窗口，界面上只剩三枚按钮——顶部中央的〔对话 \| CHAT〕胶囊，加右上角浮动的一枚刷新图标 ⟳（刻意内缩、不贴边，避开 chat.deepseek.com 自己的「分享」按钮）；刷新按钮自带实心底与投影，压在任何页面上都看得清，其 `aria-label` / `title` 保留完整中文名，读屏与悬停提示照旧；
    - CHAT 模式给 `#root` 加 `inert`，隐藏的 DSH 界面不再能被 Tab / 快捷键误触；
    - iframe 指向代理地址（从 `/dsh-deepseek-chat/config` 动态获取，**首次切到 CHAT 才拉取**）；
    - iframe 是全局单例：第一次切到 CHAT 时创建并挂进覆盖层，之后**永不搬动**；切回「对话」只把覆盖层 `visibility:hidden`。iframe 一旦被移出文档，浏览器就会丢弃它的嵌套浏览上下文、再显示时整页重载（登录态虽在，草稿与滚动位置会丢）——只做隐身则布局尺寸不变，状态全程保留。
@@ -46,9 +46,9 @@ dsh plugin --profile web add link:./dsh-deepseek-chat
 
 ## 限制 / Limitations
 
-- **第三方 OAuth 登录（Google 等）在 iframe 内不可用**（Google 同样禁止被嵌框）；请使用手机号 / 邮箱验证码登录，或先点「在浏览器打开」完成登录后再回来（同机 cookie 独立，需各自登录）。
+- **第三方 OAuth 登录（Google 等）在 iframe 内不可用**（Google 同样禁止被嵌框）；请直接用手机号 / 邮箱验证码登录。原先的「在浏览器打开」入口因与网页版「分享」按钮重叠已整枚删除；确实需要另开浏览器窗口时，自行访问代理地址即可（`/dsh-deepseek-chat/config` 返回的 `url`，默认 <http://127.0.0.1:3377/>）。
 - CHAT 模式整窗口接管期间，被盖住的 DSH 界面**不可交互也不可见**：需要审批提示、任务进度或设置时，先点「对话」切回去（设置类弹窗 z-index 高于覆盖层，仍会浮在最上面）。
-- 右上角两枚浮动按钮压在页面之上，可能盖住 chat.deepseek.com 自己的顶部控件（如账户头像）；挪开只需停用 CHAT 模式或用快捷键切回「对话」。
+- 右上角那枚刷新按钮刻意内缩 46px 而不贴边——贴边正好落在 chat.deepseek.com「分享」按钮上；窗口特别窄时仍可能与页面控件靠近，切回「对话」即恢复 DSH 原界面。
 - 代理仅绑定 127.0.0.1，但本机任何进程都能访问该端口；它只转发公开的 chat.deepseek.com，不持有任何凭据（登录 cookie 存在你的浏览器里）。
 - 剥 CSP 是让嵌入可行的必要手段，仅限 loopback 使用，请勿把代理暴露到局域网。
 
