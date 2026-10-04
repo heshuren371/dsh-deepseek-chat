@@ -3,12 +3,13 @@
  *
  * 两个职责：
  *  1. 在 dsh web 的 HTTP 服务上注册 /dsh-deepseek-chat/config 路由，
- *     告诉客户端「网页对话」标签页该把 iframe 指向哪里。
+ *     告诉客户端 iframe 该指向哪里。
  *  2. 启动一个仅监听 127.0.0.1 的 HTTP 反向代理，整域转发
  *     https://chat.deepseek.com：剥离阻止 iframe 嵌入的响应头
  *     （content-security-policy / x-frame-options 等），重写 Set-Cookie
- *     （去 Domain / Secure，适配 http loopback 与 Safari）与 Location。
- *     上游响应体原样透传（不改写 HTML/JS，SSE 流式逐块转发）。
+ *     （去 Domain / Secure，适配 http loopback 与 Safari）与 Location，
+ *     并改写字首屏 <script> 的属性（见 rewriteShellHtml）。其余响应体原样
+ *     透传，SSE 流式逐块转发。
  *
  * 构建产物是 lib/index.js（ESM，node 内置模块保持外部引用）。
  */
@@ -51,9 +52,8 @@ const DEFAULT_TARGET = 'https://chat.deepseek.com';
 const DEFAULT_PORT = 3377;
 
 /**
- * 上游连接池：keep-alive 复用 TLS 连接。没有它，每个转发请求都要对
- * chat.deepseek.com 做一次完整 TCP+TLS 握手（数百毫秒），会话列表、
- * 历史消息、SSE 补全全是小请求，握手开销会盖过传输本身。
+ * 上游连接池：keep-alive 复用 TLS 连接。会话列表、历史消息、SSE 补全都是
+ * 小请求，不复用时每次转发都要重做一遍 TCP+TLS 握手，开销会盖过传输本身。
  */
 function createUpstreamAgent(): https.Agent {
   return new https.Agent({
@@ -92,11 +92,10 @@ const STRIP_RESPONSE_HEADERS = new Set([
 ]);
 
 /**
- * DeepSeek 的 shell HTML 里，两个首屏 <script>（default-vendors / main）带
- * `crossorigin` + SRI `integrity`。CDN（fe-static.deepseek.com）只放行
- * deepseek.com 系的 Origin，页面搬到 127.0.0.1 后 CORS 校验必败、脚本报
- * onerror，SPA 于是显示「页面资源加载异常」。去掉这两个属性后脚本按普通
- * 跨源 classic script 加载（CDN 不拦任意 Referer），SRI 字节本来就没变。
+ * 去掉 shell HTML 里首屏 <script> 的 `crossorigin` 与 SRI `integrity`。
+ * 这些脚本来自 CDN（fe-static.deepseek.com），而 CDN 只放行 deepseek.com 系的
+ * Origin：页面搬到 127.0.0.1 后 CORS 校验必败、脚本报 onerror，SPA 显示
+ * 「页面资源加载异常」。属性去掉后按普通跨源 classic script 加载，字节不变。
  * 后续 webpack chunk 用绝对 publicPath + 普通 script 标签加载，无需处理。
  */
 function rewriteShellHtml(html: string): string {

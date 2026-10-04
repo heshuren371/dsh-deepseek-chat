@@ -1,31 +1,18 @@
 /**
  * CHAT 模式客户端插件（TypeScript 源码）。
  *
- * 构建为 lib/client.js（IIFE，无框架依赖），由 dsh 经 exports["./client"]
- * 在 /plugins/<id>/client.js 提供给浏览器运行时（window.__ModuleLoader__）。
+ * 构建为 lib/client.js（IIFE），由 dsh 经 exports["./client"] 在
+ * /plugins/<id>/client.js 提供给浏览器运行时（window.__ModuleLoader__）。
  *
- * 与旧版「会话视图标签页」不同，本版**不再占用** conversation.view 标签环
- * （对话 / 轨迹 / …），而是在 DSH 窗口顶部中央挂一枚常驻胶囊
- * 〔对话 | CHAT〕（做法参考 dsh-synapse 的视图切换器）：
+ * 界面是挂在 document.body 上的两件常驻节点：顶部中央的胶囊〔对话 | CHAT〕，
+ * 与整窗口覆盖层（连左侧会话栏一起盖住）。插件不注册 conversation.view，
+ * 不出现在「对话 / 轨迹 / …」标签环里。
  *
- *  - 对话：原样的 DSH 界面，胶囊浮在顶部中央；
- *  - CHAT：整窗口覆盖层接管（连左侧会话栏一起盖住），把指向 Host 侧
- *    loopback 反向代理的 iframe 铺满整个可视区、不占任何横向条带；界面上
- *    只剩三枚按钮——顶部中央的〔对话 | CHAT〕胶囊，与右上角一枚浮动图标
- *    按钮（刷新 ⟳）。没有工具条、没有说明文案。
+ * CHAT 态把指向 Host 侧 loopback 反向代理的 iframe 铺满整个可视区，界面上
+ * 只剩胶囊与右上角一枚刷新按钮。
  *
- *    右上角刻意只放「刷新」：原先并排的「在浏览器打开」正好压在
- *    chat.deepseek.com 自己的「分享」按钮上，已整枚删除（连同 window.open
- *    与对应文案）。删掉后刷新按钮**原地不动**——见 .dshdc-actions 的 right 值。
- *
- *    刷新实现是「重设 iframe.src」而不是 `contentWindow.location.reload()`：
- *    宿主与代理不同源，跨源读 Location 会被浏览器拒绝并抛 SecurityError。
- *    详见 onReload 的注释。
- *
- * iframe 是全局单例：第一次切到 CHAT 才创建并挂进覆盖层，之后**永不搬动**。
- * 切回「对话」只是把覆盖层 `visibility:hidden`——iframe 一旦被移出文档，
- * 浏览器就会丢弃它的嵌套浏览上下文、再显示时整页重载（登录态虽在，草稿与
- * 滚动位置会丢）。只做隐身则布局尺寸不变，状态全程保留。HMR 重挂同理。
+ * iframe 是全局单例，切换模式只改覆盖层可见性，不重建也不搬动它——理由见
+ * persistent 的注释。
  */
 window.__ModuleLoader__.load({
   id: "@local/dsh-deepseek-chat",
@@ -55,9 +42,9 @@ window.__ModuleLoader__.load({
     };
 
     /**
-     * 层级取值：DSH 帧内元素最高 z-index 20，账户提示 40，引导页 900，
-     * 设置弹窗 1000。覆盖层取 500——盖住整个应用，但把模态弹窗留给 DSH；
-     * 胶囊 501 永远浮在覆盖层之上，保证随时能切回「对话」。
+     * DSH 帧内元素最高 z-index 20，账户提示 40，引导页 900，设置弹窗 1000。
+     * 覆盖层取 500：盖住整个应用，把模态弹窗留给 DSH；胶囊取 501，任何状态下
+     * 都能切回「对话」。
      */
     const CSS = [
       ".dshdc-switch{position:fixed;z-index:501;top:10px;left:50%;transform:translateX(-50%);display:flex;gap:2px;padding:3px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;background:var(--dsw-alias-bg-layer-1);box-shadow:0 1px 2px #00000012,0 6px 18px #00000012}",
@@ -66,22 +53,14 @@ window.__ModuleLoader__.load({
       ".dshdc-seg[aria-pressed='true'],.dshdc-seg[aria-pressed='true']:hover{background:var(--dsw-alias-button-contrast-fill);color:var(--dsw-alias-label-primary-foreground)}",
       ".dshdc-seg:focus-visible,.dshdc-btn:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}",
       ".dshdc-overlay{position:fixed;z-index:500;inset:0;display:flex;flex-direction:column;background:var(--dsw-alias-bg-layer-1)}",
-      // 收起只用 visibility:hidden——iframe 一旦被移出文档（哪怕是挪到 body），
-      // 浏览器就会丢弃它的嵌套浏览上下文、下次显示时整页重载。只做隐身则
-      // 布局尺寸不变，登录态、草稿与滚动位置全都留着。
       ".dshdc-overlay[data-idle]{visibility:hidden;pointer-events:none}",
-      // 没有工具条：刷新按钮直接浮在舞台右上角，与顶部胶囊同高（10px + 34px
-      // 的行高，让 26px 的按钮正好与胶囊内的分段水平对齐）。z-index 501 跟着
-      // 胶囊一层，压住 500 的覆盖层；覆盖层隐身时它随祖先一起隐藏。
-      //
-      // right 取 46px 而不是贴边的 12px：两枚按钮并排时刷新在「右起 46~72px」
-      // 这一格，右边的「在浏览器打开」删掉后，必须把这一格钉住，否则刷新会滑
-      // 到贴边处、改成去压 chat.deepseek.com 的「分享」按钮。
+      // 按钮浮在舞台右上角，与胶囊同高（10px + 34px，26px 的按钮正好与胶囊内
+      // 的分段对齐）。right 取 46px：贴边 12px 会正好压住 chat.deepseek.com
+      // 右上角的「分享」按钮。
       ".dshdc-actions{position:fixed;z-index:501;top:10px;right:46px;height:34px;display:flex;align-items:center}",
       ".dshdc-btn{height:26px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:7px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer}",
-      // 只留图形：按钮内容是一枚 svg，文字交给 aria-label / title。按钮浮在
-      // chat.deepseek.com 的浅色页面上，所以自带实心底与投影（同胶囊一套），
-      // 保证图标在任何底色上都看得见。
+      // 按钮内容是 svg，名称走 aria-label / title。它压在 chat.deepseek.com 的
+      // 浅色页面上，所以自带实心底与投影。
       ".dshdc-iconbtn{display:inline-flex;align-items:center;justify-content:center;width:26px;padding:0;background:var(--dsw-alias-bg-layer-1);box-shadow:0 1px 2px #00000012,0 6px 18px #00000012}",
       ".dshdc-iconbtn svg{display:block;width:14px;height:14px}",
       ".dshdc-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}",
@@ -95,7 +74,6 @@ window.__ModuleLoader__.load({
       "@keyframes dshdc-spin{to{transform:rotate(360deg)}}",
     ].join("\n");
 
-    /** 创建元素并可选地设置 class（属性一律由调用方显式设置）。 */
     function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string): HTMLElementTagNameMap[K] {
       const node = document.createElement(tag);
       if (className !== undefined) node.className = className;
@@ -105,8 +83,8 @@ window.__ModuleLoader__.load({
     const SVG_NS = "http://www.w3.org/2000/svg";
 
     /**
-     * 造一枚 24 格线稿图标：stroke 用 currentColor，自动跟随按钮的前景色与
-     * disabled 的透明度；aria-hidden 让读屏只念按钮的 aria-label。
+     * 24 格线稿图标：stroke 取 currentColor，跟随按钮前景色与 disabled 的
+     * 透明度；aria-hidden 让读屏只念按钮的 aria-label。
      */
     function icon(paths: string[]): SVGSVGElement {
       const svg = document.createElementNS(SVG_NS, "svg");
@@ -130,9 +108,9 @@ window.__ModuleLoader__.load({
     const ICON_RELOAD = ["M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8", "M21 3v5h-5"];
 
     /**
-     * 全局驻留的 iframe：一旦创建就永远留在覆盖层舞台里，切换模式只改
-     * 覆盖层的可见性，绝不搬动 DOM——iframe 被移出文档会让浏览器丢弃它的
-     * 嵌套浏览上下文，再插回来等于整页重载（登录态还在，草稿与滚动没了）。
+     * 全局驻留的 iframe。它只能入文档一次：iframe 节点一旦离开文档，浏览器
+     * 就丢弃其嵌套浏览上下文，再插回来等于整页重载——登录态还在，草稿与滚动
+     * 位置会丢。所以切换模式只改覆盖层可见性，绝不动这棵子树。
      */
     interface Persistent {
       wrap: HTMLDivElement;
@@ -140,14 +118,14 @@ window.__ModuleLoader__.load({
       url: string;
     }
     let persistent: Persistent | null = null;
-    /** 首屏是否已 load 过：决定覆盖层里是否还盖着 loading。 */
+    /** 首屏是否已 load 过：决定覆盖层里是否还盖着加载遮罩。 */
     let frameLoaded = false;
     /** 是否正在手动刷新：只用来把提示文案从「正在连接」换成「正在刷新」。 */
     let reloading = false;
     /** 当前 effect 实例的重绘钩子（HMR 后指向最新实例）。 */
     let notify: (() => void) | null = null;
 
-    /** 建好元素但不入文档——由 attach() 一次性挂进舞台，避免多余的一次搬动。 */
+    /** 建好元素但不入文档——由 attach() 一次性挂进舞台。 */
     function ensurePersistent(url: string): Persistent {
       if (persistent !== null) return persistent;
       const wrap = el("div", "dshdc-frameWrap");
@@ -186,7 +164,6 @@ window.__ModuleLoader__.load({
 
         const host = el("div", "dshdc-host");
 
-        // ---- 顶部胶囊：〔对话 | CHAT〕 ----
         const switcher = el("div", "dshdc-switch");
         switcher.setAttribute("role", "group");
         switcher.setAttribute("aria-label", t("mode.switch"));
@@ -198,7 +175,6 @@ window.__ModuleLoader__.load({
         chatSeg.textContent = t("mode.chat");
         switcher.append(dshSeg, chatSeg);
 
-        // ---- 全窗口覆盖层 ----
         const overlay = el("div", "dshdc-overlay");
         overlay.dataset.idle = "";
 
@@ -210,8 +186,6 @@ window.__ModuleLoader__.load({
         reloadBtn.append(icon(ICON_RELOAD));
         actions.append(reloadBtn);
 
-        // 覆盖层里只有舞台：没有工具条占位，iframe 直接铺满整个窗口，
-        // 刷新按钮以 fixed 浮在右上角（刻意避开 chat.deepseek.com 的「分享」）。
         const stage = el("div", "dshdc-stage");
         const state = el("div", "dshdc-state");
         const spinner = el("div", "dshdc-spinner");
@@ -264,11 +238,7 @@ window.__ModuleLoader__.load({
           reloadBtn.disabled = status !== "ready";
         };
 
-        /**
-         * 把驻留 iframe 挂进覆盖层舞台（排在 loading 遮罩之前，被它盖住）。
-         * 只挂这一次：parentElement 已经是本舞台就什么都不做——重复挂载
-         * 等于把 iframe 挪出文档，会触发整页重载。
-         */
+        /** 只挂第一次；parentElement 已是本舞台就不动，重复挂载会移动 iframe。 */
         const attach = (): void => {
           if (status !== "ready" || url === "") return;
           const entry = ensurePersistent(url);
@@ -316,19 +286,12 @@ window.__ModuleLoader__.load({
         };
 
         /**
-         * 刷新 = 让 iframe 重新导航一次，等价于对 CHAT 面板按 Cmd+R。
+         * 刷新 = 重设 src，让浏览器重新导航 iframe。
          *
-         * 注意这里**不能**用 `contentWindow.location.reload()`：iframe 与宿主
-         * 不同源（DSH 在 3080，代理在 3377），跨源读 Location 会被浏览器按
-         * 「Blocked a frame with origin … from accessing a cross-origin frame」
-         * 拒绝并抛 SecurityError——旧的实现就是这样，按钮按下去毫无反应、
-         * 控制台里静默报错。`contentWindow.location.href` 同样读不到，所以也
-         * 没法保留 DeepSeek 当前所在的路由。
-         *
-         * 父级能做的、且确实会触发文档导航的只有重设 src（探针实测：src 重设
-         * 会真的重新请求一次文档）。代价是回到代理根地址——这与整页 Cmd+R 后
-         * iframe 被重建为 config 地址的行为一致，也正是「拉一份最新会话列表」
-         * 想要的落点。
+         * 不能用 contentWindow.location.reload()：iframe 与宿主不同源（DSH
+         * 3080 / 代理 3377），跨源读 Location 会被浏览器拒绝并抛 SecurityError。
+         * location.href 同样读不到，因此无法保留 DeepSeek 当前路由——刷新落点
+         * 是代理根地址，与整页刷新后 iframe 重建到 config 地址一致。
          */
         const onReload = (): void => {
           const entry = persistent;

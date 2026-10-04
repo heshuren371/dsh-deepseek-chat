@@ -1,7 +1,7 @@
 {
   "name": "@local/dsh-deepseek-chat",
   "version": "0.2.0",
-  "description": "DSH Web 顶部 CHAT 模式切换：窗口顶部常驻〔对话 | CHAT〕胶囊，切到 CHAT 即整窗口接管并嵌入 DeepSeek 网页版（chat.deepseek.com，经 Host 侧 loopback 反向代理）。Written in TypeScript.",
+  "description": "DSH Web 顶部 CHAT 模式切换：通过 Host 侧 loopback 反向代理把 chat.deepseek.com 嵌进 DSH Web（整窗口接管），顶部常驻〔对话 | CHAT〕胶囊随时切回原界面。",
   "license": "MIT",
   "author": "heshuren371",
   "repository": {

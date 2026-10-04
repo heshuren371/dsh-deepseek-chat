@@ -1,15 +1,12 @@
 /**
  * lib/client.js 行为测试（jsdom）。
  *
- * 构建产物是浏览器脚本，所以测试在真实 DOM 语义下跑：把 lib/client.js
- * eval 进 jsdom 窗口，用一个假的 __ModuleLoader__ 收下注册项，再拿假 ctx
- * 跑 apply()，然后像用户那样点〔对话 | CHAT〕胶囊，断言：
+ * 产物是浏览器脚本，所以在真实 DOM 语义下跑：把 lib/client.js eval 进 jsdom
+ * 窗口，用假的 __ModuleLoader__ 收下注册项，再用假 ctx 跑 apply()。
  *
- *  - 插件只依赖 locale，不再注册 conversation.view（不再挂在「轨迹」后面）；
- *  - 顶部胶囊常驻，切换会整窗口接管，iframe 指向 config 返回的代理地址；
- *  - 切回「对话」只是把 iframe 挪走隐身——同一个元素、不重新拉 config；
- *  - config 失败时覆盖层给出错误 + 重试；
- *  - 卸载时自有节点清干净，驻留 iframe 不销毁。
+ * jsdom 不加载 iframe 内容、也复现不了跨源限制，所以断言的是节点与状态
+ * （胶囊、覆盖层、iframe.src、遮罩文案、卸载清理）；跨源刷新行为由「产物里
+ * 不出现 contentWindow」那条护栏兜底。
  */
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -67,7 +64,7 @@ function mount({ configOk = true, url = PROXY_URL } = {}) {
     /** 顶部胶囊的两个分段：[对话, CHAT]。 */
     segments: () => [...doc.querySelectorAll('.dshdc-switch .dshdc-seg')],
     overlay: () => doc.querySelector('.dshdc-overlay'),
-    /** 覆盖层是否处于收起态（用 visibility 隐身，不能用 display:none）。 */
+    /** 覆盖层是否收起（收起用 visibility，不用 display:none）。 */
     idle: () => doc.querySelector('.dshdc-overlay').hasAttribute('data-idle'),
     wrap: () => doc.querySelector('.dshdc-frameWrap'),
     frame: () => doc.querySelector('.dshdc-frame'),
@@ -83,7 +80,7 @@ const flush = () => new Promise(resolve => setTimeout(resolve, 0))
 
 test('顶部胶囊取代会话视图标签环', () => {
   const app = mount()
-  assert.deepEqual(Array.from(app.mod.inject), ['locale'], '不再注入 slots，也就不再注册 conversation.view')
+  assert.deepEqual(Array.from(app.mod.inject), ['locale'], '只注入 locale，不注册 conversation.view')
 
   const [dsh, chat] = app.segments()
   assert.equal(dsh.textContent, '对话')
@@ -100,7 +97,7 @@ test('顶部胶囊取代会话视图标签环', () => {
   assert.match(css, /\.dshdc-switch\{position:fixed;z-index:501;top:10px;left:50%/, '胶囊常驻窗口顶部中央')
   assert.match(css, /\.dshdc-overlay\{position:fixed;z-index:500;inset:0/, '覆盖层整窗口铺满')
 
-  assert.equal(app.doc.querySelector('.dshdc-hint'), null, '不再有说明文案')
+  assert.equal(app.doc.querySelector('.dshdc-hint'), null, '没有说明文案节点')
   assert.equal(app.doc.querySelector('.dshdc-bar'), null, '工具条本身也去掉，不占任何横向条带')
   assert.equal(app.doc.querySelector('.dshdc-actions').textContent, '', '浮动按钮组不含任何文字')
   assert.match(css, /\.dshdc-actions\{position:fixed;z-index:501;top:10px;right:46px/, '刷新浮在右上角、与胶囊同层，且钉在原格不贴边')
@@ -222,13 +219,13 @@ test('刷新按钮重新导航 iframe', async () => {
   assert.equal(app.state().hidden, true, '重新 load 完撤掉遮罩')
 })
 
-test('回归护栏：客户端不再出现跨源会抛 SecurityError 的 contentWindow 访问', () => {
+test('回归护栏：客户端不出现跨源会抛 SecurityError 的 contentWindow 访问', () => {
   // iframe 与宿主不同源（DSH 3080 / 代理 3377），contentWindow.location 的
-  // reload() 与 href 都会被浏览器按跨域拒绝——旧实现正是这样静默失灵的。
+  // reload() 与 href 都会被浏览器拒绝；刷新只能靠重设 src。
   assert.doesNotMatch(CLIENT_SOURCE, /contentWindow/, '刷新只能靠重设 src，不能读 iframe 的 Location')
 })
 
-test('「在浏览器打开」整枚删除：不再有第二枚按钮，也不再开新窗口', async () => {
+test('右上角只有刷新一枚按钮，客户端不调用 window.open', async () => {
   const app = mount()
   const [, chat] = app.segments()
   chat.click()
@@ -273,5 +270,5 @@ test('收起态不许动 DOM：只用 visibility 隐身', () => {
   const css = [...app.doc.querySelectorAll('style')].map(node => node.textContent).join('\n')
   assert.match(css, /\.dshdc-overlay\[data-idle\]\{visibility:hidden;pointer-events:none\}/)
   assert.doesNotMatch(css, /\.dshdc-overlay\[hidden\]/, 'display:none 之外，更不能用搬 DOM 的方式收起')
-  assert.doesNotMatch(css, /data-parked/, '驻留 iframe 不再有「挪回 body」的样式')
+  assert.doesNotMatch(css, /data-parked/, '不存在把 iframe 挪回 body 的样式')
 })

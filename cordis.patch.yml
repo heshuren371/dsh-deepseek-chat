@@ -1,10 +1,9 @@
 # @local/dsh-deepseek-chat bundle patch — 挂载「CHAT 模式」。
 # Host 侧注入 webServer：注册 /dsh-deepseek-chat/config 路由（返回代理地址），
-# 并启动一个仅监听 127.0.0.1 的反向代理转发 chat.deepseek.com
-# （剥离 frame-ancestors / X-Frame-Options，重写 Set-Cookie 与 Location）。
-# 客户端在 DSH 窗口顶部中央挂一枚常驻胶囊〔对话 | CHAT〕，切到 CHAT 后
-# 用整窗口覆盖层接管并把代理 iframe 铺满（不再占用 conversation.view
-# 标签环，即不再出现在「对话 / 轨迹 / …」后面）。
+# 并启动一个仅监听 127.0.0.1 的反向代理转发 chat.deepseek.com，剥离
+# frame-ancestors / X-Frame-Options，重写 Set-Cookie 与 Location。
+# 客户端在 DSH 窗口顶部中央挂一枚常驻胶囊〔对话 | CHAT〕；切到 CHAT 用整窗口
+# 覆盖层接管并把代理 iframe 铺满。插件不注册 conversation.view。
 # 零核心改动：卸载即从装配图摘除，代理、胶囊与覆盖层一并清理。
 
 - insert:

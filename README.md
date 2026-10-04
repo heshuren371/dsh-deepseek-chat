@@ -2,7 +2,7 @@
 
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）Web 界面的 DeepSeek 网页版插件：在 **DSH 窗口顶部中央**常驻一枚〔对话 | CHAT〕胶囊（做法参考 [dsh-synapse](https://github.com/liangmianya/dsh-synapse) 的视图切换器），点 CHAT 即**整窗口接管**，把 [chat.deepseek.com](https://chat.deepseek.com/) 完整铺进 DSH Web GUI；点「对话」原样回到 DSH。
 
-> v0.2.0 起不再注册会话视图标签页——插件**不会**出现在「对话 / 轨迹 / …」标签环里。
+> 插件不注册 conversation.view——不会出现在「对话 / 轨迹 / …」标签环里。
 
 ## 原理 / How it works
 
@@ -15,11 +15,11 @@ chat.deepseek.com 带有 `content-security-policy: frame-ancestors 'none'`，浏
    - 其余响应体**原样透传**，SSE 流式补全逐块转发、无缓冲；上游 TLS keep-alive 连接池复用（热请求省掉整次握手，实测首请求 255ms → 后续 67ms）；本地 socket 关 Nagle，流式分片即达；
    - 静态资源本来就在 CDN（fe-static.deepseek.com），API 全是相对路径 `/api/v0/...`，无 WebSocket——整域代理即可完整工作。
 2. **客户端**：在 `document.body` 上挂一枚 `position:fixed` 的胶囊〔对话 | CHAT〕（z-index 501）与一个整窗口覆盖层（z-index 500，盖住全部三列含左侧会话栏）：
-   - 覆盖层不留任何条带：iframe 铺满整个窗口，界面上只剩三枚按钮——顶部中央的〔对话 \| CHAT〕胶囊，加右上角浮动的一枚刷新图标 ⟳（刻意内缩、不贴边，避开 chat.deepseek.com 自己的「分享」按钮）；刷新按钮自带实心底与投影，压在任何页面上都看得清，其 `aria-label` / `title` 保留完整中文名，读屏与悬停提示照旧；
-   - 右上角 ⟳ 是对 CHAT 面板做一次**真正的重新导航**（等价于对该面板按 Cmd+R）：iframe 与宿主不同源（DSH 3080 / 代理 3377），`contentWindow.location.reload()` 会被浏览器按跨域拒绝并静默抛 SecurityError，所以改为重设 `src`；刷新期间覆盖层显示「正在刷新 DeepSeek 网页版…」，load 完自动撤掉。桌面端尤其需要它——那里不一定顺手能按 Cmd+R；
-   - CHAT 模式给 `#root` 加 `inert`，隐藏的 DSH 界面不再能被 Tab / 快捷键误触；
+   - 覆盖层不留任何条带：iframe 铺满整个窗口，界面上只有顶部中央的〔对话 \| CHAT〕胶囊与右上角一枚刷新图标 ⟳。图标按钮没有文字，名称走 `aria-label` / `title`；它压在 chat.deepseek.com 的浅色页面上，自带实心底与投影，`right` 内缩 46px 以避开页面自带的「分享」按钮；
+   - 刷新 = 重设 iframe `src` 重新导航（等价于对该面板按 Cmd+R）：iframe 与宿主不同源，`contentWindow.location.reload()` 会被浏览器按跨域拒绝并抛 SecurityError，`location.href` 也读不到。刷新期间覆盖层显示「正在刷新 DeepSeek 网页版…」，load 完自动撤掉；
+   - CHAT 模式给 `#root` 加 `inert`，隐藏的 DSH 界面不会被 Tab / 快捷键误触；
    - iframe 指向代理地址（从 `/dsh-deepseek-chat/config` 动态获取，**首次切到 CHAT 才拉取**）；
-   - iframe 是全局单例：第一次切到 CHAT 时创建并挂进覆盖层，之后**永不搬动**；切回「对话」只把覆盖层 `visibility:hidden`。iframe 一旦被移出文档，浏览器就会丢弃它的嵌套浏览上下文、再显示时整页重载（登录态虽在，草稿与滚动位置会丢）——只做隐身则布局尺寸不变，状态全程保留。
+   - iframe 是全局单例：首次切到 CHAT 时创建并挂进覆盖层，此后不重建、不搬动；切回「对话」只把覆盖层 `visibility:hidden`。移出文档会让浏览器丢弃嵌套浏览上下文，再显示时整页重载（登录态还在，草稿与滚动位置会丢）。
 
 ## 快速安装 / Quick Install
 
@@ -47,10 +47,9 @@ dsh plugin --profile web add link:./dsh-deepseek-chat
 
 ## 限制 / Limitations
 
-- **第三方 OAuth 登录（Google 等）在 iframe 内不可用**（Google 同样禁止被嵌框）；请直接用手机号 / 邮箱验证码登录。原先的「在浏览器打开」入口因与网页版「分享」按钮重叠已整枚删除；确实需要另开浏览器窗口时，自行访问代理地址即可（`/dsh-deepseek-chat/config` 返回的 `url`，默认 <http://127.0.0.1:3377/>）。
+- **第三方 OAuth 登录（Google 等）在 iframe 内不可用**（Google 同样禁止被嵌框）；请直接用手机号 / 邮箱验证码登录。需要另开浏览器窗口时，自行访问代理地址（`/dsh-deepseek-chat/config` 返回的 `url`，默认 <http://127.0.0.1:3377/>）。
 - CHAT 模式整窗口接管期间，被盖住的 DSH 界面**不可交互也不可见**：需要审批提示、任务进度或设置时，先点「对话」切回去（设置类弹窗 z-index 高于覆盖层，仍会浮在最上面）。
-- 右上角那枚刷新按钮刻意内缩 46px 而不贴边——贴边正好落在 chat.deepseek.com「分享」按钮上；窗口特别窄时仍可能与页面控件靠近，切回「对话」即恢复 DSH 原界面。
-- 刷新按钮是 Cmd+R 的等价物，而不是「停在当前对话原地重载」：跨源读不到 iframe 当前路由（`location.href` 同样被拒），所以刷新会回到 chat.deepseek.com 首页——恰好也是能看到最新会话列表的地方。
+- 刷新按钮是 Cmd+R 的等价物，不保留当前对话：跨源读不到 iframe 当前路由，所以刷新回到 chat.deepseek.com 首页。
 - 代理仅绑定 127.0.0.1，但本机任何进程都能访问该端口；它只转发公开的 chat.deepseek.com，不持有任何凭据（登录 cookie 存在你的浏览器里）。
 - 剥 CSP 是让嵌入可行的必要手段，仅限 loopback 使用，请勿把代理暴露到局域网。
 

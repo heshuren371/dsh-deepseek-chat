@@ -2,8 +2,8 @@
  * @local/dsh-deepseek-chat 构建管线。
  *
  * 产物（lib/）：
- *  - lib/client.js  客户端插件（IIFE，经 __ModuleLoader__ 注册；React 外部引用）
- *  - lib/index.js   Host 插件（ESM，node 内置模块外部引用）
+ *  - lib/client.js  客户端插件（IIFE，经 __ModuleLoader__ 注册）
+ *  - lib/index.js   Host 插件（ESM，node 内置模块保持外部引用）
  */
 import { build } from 'esbuild';
 
@@ -19,7 +19,6 @@ async function main() {
     entryPoints: ['src/client/client-main.ts'],
     bundle: true,
     format: 'iife',
-    external: ['react', 'react-dom/client'],
     outfile: 'lib/client.js',
   });
 
