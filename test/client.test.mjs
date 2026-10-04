@@ -189,9 +189,43 @@ test('刷新按钮：只有图标，文字进 aria-label', async () => {
   assert.deepEqual(buttons.map(node => node.textContent), [''], '按钮里没有任何文字')
   assert.deepEqual(buttons.map(node => node.querySelectorAll('svg').length), [1], '按钮里是一枚 svg 图标')
   assert.equal(buttons[0].disabled, false)
+})
 
-  buttons[0].click() // 原地 reload：jsdom 会记一条 not-implemented，但不能抛
-  assert.equal(app.frame(), app.doc.querySelector('.dshdc-frame'))
+test('刷新按钮重新导航 iframe', async () => {
+  const app = mount()
+  const [, chat] = app.segments()
+  chat.click()
+  await flush()
+
+  const frame = app.frame()
+  frame.dispatchEvent(new app.window.Event('load'))
+  assert.equal(app.state().hidden, true, '首屏 load 后遮罩撤掉')
+
+  // 记录 src 的写入：刷新必须真的重设 src——浏览器据此重新导航整个文档。
+  const writes = []
+  let current = frame.getAttribute('src')
+  Object.defineProperty(frame, 'src', {
+    configurable: true,
+    get: () => current,
+    set: (next) => { writes.push(next); current = next; frame.setAttribute('src', next) },
+  })
+
+  const button = app.doc.querySelector('.dshdc-actions .dshdc-btn')
+  button.click()
+
+  assert.deepEqual(writes, [PROXY_URL], '刷新 = 重设 src 重新导航到代理地址')
+  assert.equal(app.frame(), frame, '还是同一个 iframe 元素，没有被重建')
+  assert.equal(app.state().hidden, false, '刷新期间盖回加载遮罩')
+  assert.match(app.state().textContent, /正在刷新 DeepSeek 网页版/, '文案切到「正在刷新」')
+
+  frame.dispatchEvent(new app.window.Event('load'))
+  assert.equal(app.state().hidden, true, '重新 load 完撤掉遮罩')
+})
+
+test('回归护栏：客户端不再出现跨源会抛 SecurityError 的 contentWindow 访问', () => {
+  // iframe 与宿主不同源（DSH 3080 / 代理 3377），contentWindow.location 的
+  // reload() 与 href 都会被浏览器按跨域拒绝——旧实现正是这样静默失灵的。
+  assert.doesNotMatch(CLIENT_SOURCE, /contentWindow/, '刷新只能靠重设 src，不能读 iframe 的 Location')
 })
 
 test('「在浏览器打开」整枚删除：不再有第二枚按钮，也不再开新窗口', async () => {

@@ -18,6 +18,10 @@
  *    chat.deepseek.com 自己的「分享」按钮上，已整枚删除（连同 window.open
  *    与对应文案）。删掉后刷新按钮**原地不动**——见 .dshdc-actions 的 right 值。
  *
+ *    刷新实现是「重设 iframe.src」而不是 `contentWindow.location.reload()`：
+ *    宿主与代理不同源，跨源读 Location 会被浏览器拒绝并抛 SecurityError。
+ *    详见 onReload 的注释。
+ *
  * iframe 是全局单例：第一次切到 CHAT 才创建并挂进覆盖层，之后**永不搬动**。
  * 切回「对话」只是把覆盖层 `visibility:hidden`——iframe 一旦被移出文档，
  * 浏览器就会丢弃它的嵌套浏览上下文、再显示时整页重载（登录态虽在，草稿与
@@ -35,6 +39,7 @@ window.__ModuleLoader__.load({
       "mode.chat": "CHAT",
       "action.reload": "刷新",
       "state.loading": "正在连接 DeepSeek 网页版…",
+      "state.reloading": "正在刷新 DeepSeek 网页版…",
       "state.error": "无法连接本地代理服务",
       "state.retry": "重试",
     };
@@ -44,6 +49,7 @@ window.__ModuleLoader__.load({
       "mode.chat": "CHAT",
       "action.reload": "Reload",
       "state.loading": "Connecting to DeepSeek Web…",
+      "state.reloading": "Refreshing DeepSeek Web…",
       "state.error": "Cannot reach the local proxy",
       "state.retry": "Retry",
     };
@@ -136,6 +142,8 @@ window.__ModuleLoader__.load({
     let persistent: Persistent | null = null;
     /** 首屏是否已 load 过：决定覆盖层里是否还盖着 loading。 */
     let frameLoaded = false;
+    /** 是否正在手动刷新：只用来把提示文案从「正在连接」换成「正在刷新」。 */
+    let reloading = false;
     /** 当前 effect 实例的重绘钩子（HMR 后指向最新实例）。 */
     let notify: (() => void) | null = null;
 
@@ -149,6 +157,7 @@ window.__ModuleLoader__.load({
       frame.src = url;
       frame.addEventListener("load", () => {
         frameLoaded = true;
+        reloading = false;
         notify?.();
       });
       wrap.appendChild(frame);
@@ -248,7 +257,9 @@ window.__ModuleLoader__.load({
           const pending = active && (status !== "ready" || !frameLoaded);
           state.hidden = !pending;
           spinner.hidden = status !== "loading" && status !== "ready";
-          stateText.textContent = status === "error" ? t("state.error") : t("state.loading");
+          stateText.textContent = status === "error"
+            ? t("state.error")
+            : reloading ? t("state.reloading") : t("state.loading");
           retryBtn.hidden = status !== "error";
           reloadBtn.disabled = status !== "ready";
         };
@@ -304,21 +315,33 @@ window.__ModuleLoader__.load({
           render();
         };
 
+        /**
+         * 刷新 = 让 iframe 重新导航一次，等价于对 CHAT 面板按 Cmd+R。
+         *
+         * 注意这里**不能**用 `contentWindow.location.reload()`：iframe 与宿主
+         * 不同源（DSH 在 3080，代理在 3377），跨源读 Location 会被浏览器按
+         * 「Blocked a frame with origin … from accessing a cross-origin frame」
+         * 拒绝并抛 SecurityError——旧的实现就是这样，按钮按下去毫无反应、
+         * 控制台里静默报错。`contentWindow.location.href` 同样读不到，所以也
+         * 没法保留 DeepSeek 当前所在的路由。
+         *
+         * 父级能做的、且确实会触发文档导航的只有重设 src（探针实测：src 重设
+         * 会真的重新请求一次文档）。代价是回到代理根地址——这与整页 Cmd+R 后
+         * iframe 被重建为 config 地址的行为一致，也正是「拉一份最新会话列表」
+         * 想要的落点。
+         */
         const onReload = (): void => {
           const entry = persistent;
           if (entry === null) {
             load();
             return;
           }
-          // 代理地址变了（重启后换了端口）就整体换 src，否则原地 reload
-          if (entry.url !== url) {
-            entry.url = url;
-            frameLoaded = false;
-            entry.frame.src = url;
-            render();
-            return;
-          }
-          entry.frame.contentWindow?.location.reload();
+          if (url === "") return;
+          reloading = true;
+          frameLoaded = false;
+          entry.url = url;
+          entry.frame.src = url;
+          render();
         };
 
         const onKeyDown = (event: KeyboardEvent): void => {
