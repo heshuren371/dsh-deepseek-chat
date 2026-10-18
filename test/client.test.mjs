@@ -21,7 +21,7 @@ const CONFIG_URL = '/dsh-deepseek-chat/config'
 const PROXY_URL = 'http://127.0.0.1:3377/'
 
 /** 按 lib/client.js 的接口把插件装进一个全新 jsdom 窗口。 */
-function mount({ configOk = true, url = PROXY_URL, activity = null } = {}) {
+function mount({ configOk = true, url = PROXY_URL, activity = null, shortcuts = null, sse = null } = {}) {
   const dom = new JSDOM(
     '<!doctype html><html><head></head><body><div id="root"><main>dsh</main></div></body></html>',
     { url: 'http://127.0.0.1:3080/', runScripts: 'outside-only', pretendToBeVisual: true, virtualConsole: new VirtualConsole() },
@@ -35,6 +35,20 @@ function mount({ configOk = true, url = PROXY_URL, activity = null } = {}) {
     return { ok: true, status: 200, json: async () => ({ url, target: 'https://chat.deepseek.com' }) }
   }
   window.open = (...args) => { opened.push(args); return null }
+
+  const sources = []
+  if (sse !== null) {
+    window.EventSource = class {
+      constructor(target) {
+        this.url = String(target)
+        this.closed = false
+        this.onmessage = null
+        this.onerror = null
+        sources.push(this)
+      }
+      close() { this.closed = true }
+    }
+  }
 
   const registrations = []
   window.__ModuleLoader__ = { mode: 'web', load: (registration) => { registrations.push(registration) } }
@@ -56,6 +70,24 @@ function mount({ configOk = true, url = PROXY_URL, activity = null } = {}) {
       return () => { unsubscribed += 1; listeners.delete(fn) }
     },
   }
+  const shortcutsRegistered = []
+  const shortcutsDisposed = []
+  const services = {}
+  if (activity !== null && activity.service !== null) {
+    const key = activity.service ?? 'sessionStatus'
+    services.uiSession = { [key]: source }
+  }
+  if (shortcuts === 'invalid') {
+    services.shortcuts = {}
+  } else if (shortcuts !== null) {
+    services.shortcuts = {
+      register: (command) => {
+        if (shortcuts.conflict === true) throw new Error('conflicting shortcut defaults')
+        shortcutsRegistered.push(command)
+        return () => { shortcutsDisposed.push(command.id) }
+      },
+    }
+  }
   const ctx = {
     effect(fn) {
       const disposer = fn()
@@ -67,9 +99,10 @@ function mount({ configOk = true, url = PROXY_URL, activity = null } = {}) {
       bind: () => (key) => dictionary[key] ?? key,
     },
   }
-  if (activity !== null) {
+  if (activity !== null || shortcuts !== null) {
     ctx.inject = (deps, cb) => {
       injectDeps.push(deps)
+      if (!deps.every(dep => dep in services)) return
       const scope = {
         effect(fn) {
           const disposer = fn()
@@ -77,10 +110,7 @@ function mount({ configOk = true, url = PROXY_URL, activity = null } = {}) {
           return disposer
         },
       }
-      if (activity.service !== null) {
-        const key = activity.service ?? 'sessionStatus'
-        scope.uiSession = { [key]: source }
-      }
+      Object.assign(scope, services)
       cb(scope)
     }
   }
@@ -88,7 +118,25 @@ function mount({ configOk = true, url = PROXY_URL, activity = null } = {}) {
 
   const doc = window.document
   return {
-    window, doc, mod, ctx, fetches, opened, dictionary, injectDeps,
+    window, doc, mod, ctx, fetches, opened, dictionary, injectDeps, sources,
+    shortcutCommands: () => shortcutsRegistered,
+    shortcutDisposals: () => shortcutsDisposed,
+    /** 触发首个快捷键命令的 resolve/run。 */
+    runShortcut: () => {
+      const command = shortcutsRegistered[0]
+      if (command === undefined) return false
+      const resolution = command.resolve({ source: 'keyboard', region: 'page', modal: null, target: null })
+      if (resolution.status !== 'handled') return false
+      resolution.run()
+      return true
+    },
+    /** 向首个 EventSource 投递一条消息。 */
+    emitStream: (payload) => {
+      const eventSource = sources[0]
+      if (eventSource === undefined) return false
+      eventSource.onmessage({ data: JSON.stringify(payload) })
+      return true
+    },
     /** 顶部胶囊的两个分段：[对话, CHAT]。 */
     segments: () => [...doc.querySelectorAll('.dshdc-switch .dshdc-seg')],
     switcher: () => doc.querySelector('.dshdc-switch'),
@@ -188,7 +236,11 @@ test('没有 ctx.inject 的旧 runtime：状态点隐藏且不抛错', () => {
   const dot = app.dot()
   assert.equal(dot.hidden, true)
   assert.equal(dot.dataset.state, '')
-  assert.equal(dot.getAttribute('aria-hidden'), 'true')
+  assert.equal(dot.getAttribute('aria-hidden'), 'true', '无活动时对读屏隐藏')
+  assert.equal(dot.tagName, 'BUTTON', '状态点是按钮')
+  assert.equal(dot.disabled, true)
+  assert.equal(dot.tabIndex, -1)
+  assert.equal(dot.getAttribute('aria-label'), '', '对话模式下不可点，只报状态；无活动时为空')
   assert.equal(app.switcher().getAttribute('aria-label'), '视图切换')
   assert.equal(app.unsubscribed(), 0)
 })
@@ -199,13 +251,15 @@ test('DSH 运行中：胶囊里出现脉动状态点', () => {
   })
   const dot = app.dot()
   assert.equal(dot.hidden, false)
+  assert.equal(dot.getAttribute('aria-hidden'), 'false')
   assert.equal(dot.dataset.state, 'running')
   assert.equal(app.switcher().getAttribute('aria-label'), '视图切换 · DSH 运行中')
-  assert.deepEqual(app.injectDeps.map(deps => Array.from(deps)), [['uiSession']], '只走可选子 fiber，模块导出的 inject 不变')
+  assert.deepEqual(app.injectDeps.map(deps => Array.from(deps)), [['uiSession'], ['shortcuts']], '活动只走可选子 fiber，模块导出的 inject 不变')
 
   const css = [...app.doc.querySelectorAll('style')].map(node => node.textContent).join('\n')
   assert.match(css, /\.dshdc-dot[^{]*\{[^}]*width:0;height:6px;margin-right:0[^}]*opacity:0[^}]*transition:width 150ms ease,margin-right 150ms ease,opacity 150ms ease/)
   assert.match(css, /\.dshdc-dot\[data-state='running'\]\{[^}]*width:6px;margin-right:6px;opacity:1;animation:dshdc-pulse 1\.6s/, '运行中脉动')
+  assert.match(css, /\.dshdc-dot:not\(:disabled\)::before\{[^}]*width:24px;height:24px/, '可点时命中区扩到 24×24')
   assert.match(css, /\.dshdc-dot\[data-state='approval'\]\{[^}]*background:var\(--dsw-alias-state-warn-primary\)/, '待审批用强调色常亮')
 })
 
@@ -229,7 +283,7 @@ test('活动快照更新：状态点随订阅切换，胶囊不重建', () => {
 
 test('question 互动不算待审批：状态点保持隐藏', () => {
   const app = mount({
-    activity: { rows: [['s1', { running: false, pendingInteraction: { kind: 'question' }, completionUnread: true }]] },
+    activity: { rows: [['s1', { running: false, pendingInteraction: { kind: 'question' }, completionUnread: false }]] },
   })
   assert.equal(app.dot().hidden, true)
   assert.equal(app.dot().dataset.state, '')
@@ -259,6 +313,183 @@ test('卸载时退订活动状态源', () => {
   assert.equal(app.unsubscribed(), 0)
   app.unmount()
   assert.equal(app.unsubscribed(), 1)
+})
+
+test('降低动效偏好与页面隐藏：取消过渡、暂停脉动', () => {
+  const app = mount()
+  const css = [...app.doc.querySelectorAll('style')].map(node => node.textContent).join('\n')
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\)\{\.dshdc-switch,\.dshdc-seg,\.dshdc-dot\{transition:none\}\.dshdc-dot\[data-state='running'\],\.dshdc-spinner,\.dshdc-switch\[data-streaming='true'\]::after\{animation:none\}\}/,
+    '降低动效时取消过渡与脉动/旋转',
+  )
+  assert.match(css, /\[data-doc-hidden\] \.dshdc-dot,[^{]*\{animation-play-state:paused\}/, '页面隐藏时暂停脉动与生成环')
+
+  const switcher = app.switcher()
+  const setHidden = (hidden) => Object.defineProperty(app.doc, 'hidden', { configurable: true, get: () => hidden })
+  setHidden(true)
+  app.doc.dispatchEvent(new app.window.Event('visibilitychange'))
+  assert.equal(switcher.hasAttribute('data-doc-hidden'), true)
+
+  setHidden(false)
+  app.doc.dispatchEvent(new app.window.Event('visibilitychange'))
+  assert.equal(switcher.hasAttribute('data-doc-hidden'), false)
+
+  setHidden(true)
+  app.doc.dispatchEvent(new app.window.Event('visibilitychange'))
+  app.unmount()
+  setHidden(false)
+  app.doc.dispatchEvent(new app.window.Event('visibilitychange'))
+  assert.equal(switcher.hasAttribute('data-doc-hidden'), true, '卸载后移除 visibilitychange 监听')
+})
+
+test('完成待读：绿点、无脉动、完成文案', () => {
+  const app = mount({
+    activity: { rows: [['s1', { completionUnread: true }]] },
+  })
+  const dot = app.dot()
+  assert.equal(dot.hidden, false)
+  assert.equal(dot.dataset.state, 'completed')
+  assert.equal(app.switcher().getAttribute('aria-label'), '视图切换 · DSH 已完成待查看')
+  assert.equal(dot.getAttribute('aria-label'), 'DSH 已完成待查看', '对话模式下只报状态，不带动作')
+  assert.equal(app.dictionary['activity.completed'], 'DSH 已完成待查看')
+  assert.equal(app.dictionary['activity.jump'], '切回对话查看')
+
+  const css = [...app.doc.querySelectorAll('style')].map(node => node.textContent).join('\n')
+  const completed = css.match(/\.dshdc-dot\[data-state='completed'\]\{[^}]*\}/)?.[0] ?? ''
+  assert.match(completed, /width:6px;margin-right:6px;opacity:1;background:var\(--dsw-alias-state-success-primary\)/, '完成态用成功色')
+  assert.doesNotMatch(completed, /animation:/, '完成态无脉动')
+})
+
+test('活动状态优先级：approval > running > completed', () => {
+  const app = mount({
+    activity: { rows: [['s1', { running: true, pendingInteraction: { kind: 'approval' }, completionUnread: true }]] },
+  })
+  assert.equal(app.dot().dataset.state, 'approval')
+
+  app.emit([['s1', { running: true, completionUnread: true }]])
+  assert.equal(app.dot().dataset.state, 'running')
+
+  app.emit([['s1', { running: false, completionUnread: true }]])
+  assert.equal(app.dot().dataset.state, 'completed')
+
+  app.emit([['s1', { pendingInteraction: { kind: 'question' } }]])
+  assert.equal(app.dot().hidden, true, 'completionUnread 缺失时不算完成')
+})
+
+test('CHAT 模式下点状态点切回对话', async () => {
+  const app = mount({
+    activity: { rows: [['s1', { running: true, completionUnread: false }]] },
+  })
+  const [, chat] = app.segments()
+  chat.click()
+  await flush()
+
+  const dot = app.dot()
+  assert.equal(dot.tagName, 'BUTTON')
+  assert.equal(dot.type, 'button')
+  assert.equal(dot.disabled, false)
+  assert.equal(dot.tabIndex, 0)
+  assert.equal(dot.getAttribute('aria-label'), '切回对话查看 · DSH 运行中')
+  assert.equal(dot.title, '切回对话查看 · DSH 运行中')
+
+  dot.click()
+  assert.equal(app.idle(), true, '点状态点收起 CHAT 覆盖层')
+  assert.equal(app.segments()[0].getAttribute('aria-pressed'), 'true')
+  assert.equal(app.dot().disabled, true)
+  assert.equal(app.dot().tabIndex, -1)
+})
+
+test('对话模式下状态点禁用，点击不改变模式', () => {
+  const app = mount({
+    activity: { rows: [['s1', { completionUnread: true }]] },
+  })
+  const dot = app.dot()
+  assert.equal(dot.disabled, true)
+  assert.equal(dot.tabIndex, -1)
+  dot.click()
+  assert.equal(app.idle(), true, 'DSH 模式点击不展开覆盖层')
+  assert.equal(app.segments()[0].getAttribute('aria-pressed'), 'true')
+})
+
+test('SSE 生成中：胶囊 ring 与生成中文案', () => {
+  const app = mount({
+    activity: { rows: [['s1', { running: true, completionUnread: false }]] },
+    sse: true,
+  })
+  assert.equal(app.sources.length, 1)
+  assert.equal(app.sources[0].url, '/dsh-deepseek-chat/activity')
+  assert.equal(app.switcher().hasAttribute('data-streaming'), false)
+  assert.equal(app.switcher().getAttribute('aria-label'), '视图切换 · DSH 运行中')
+
+  app.emitStream({ streaming: true })
+  assert.equal(app.switcher().getAttribute('data-streaming'), 'true')
+  assert.equal(app.switcher().getAttribute('aria-label'), '视图切换 · DSH 运行中 · DeepSeek 生成中')
+  assert.equal(app.dictionary['activity.streaming'], 'DeepSeek 生成中')
+
+  app.emitStream({ streaming: false })
+  assert.equal(app.switcher().hasAttribute('data-streaming'), false)
+  assert.equal(app.switcher().getAttribute('aria-label'), '视图切换 · DSH 运行中')
+
+  const css = [...app.doc.querySelectorAll('style')].map(node => node.textContent).join('\n')
+  assert.match(css, /\.dshdc-switch\[data-streaming='true'\]::after\{[^}]*border:1px solid var\(--dsw-alias-state-business-primary\)[^}]*animation:dshdc-breathe 2s/, '生成中显示 1px 呼吸环')
+})
+
+test('SSE 出错即关闭不重连；卸载关闭连接', () => {
+  const app = mount({ sse: true })
+  const source = app.sources[0]
+  app.emitStream({ streaming: true })
+  assert.equal(app.switcher().getAttribute('data-streaming'), 'true')
+
+  source.onerror()
+  assert.equal(source.closed, true)
+  assert.equal(app.sources.length, 1, '不重建连接')
+  assert.equal(app.switcher().hasAttribute('data-streaming'), false)
+
+  const second = mount({ sse: true })
+  second.unmount()
+  assert.equal(second.sources[0].closed, true)
+})
+
+test('快捷键在对话与 CHAT 之间切换', async () => {
+  const app = mount({ shortcuts: {} })
+  const commands = app.shortcutCommands()
+  assert.equal(commands.length, 1)
+  const command = commands[0]
+  assert.equal(command.id, 'deepseek-chat.toggle')
+  assert.equal(command.defaults['desktop:macos'].code, 'KeyJ')
+  assert.deepEqual(Array.from(command.defaults['desktop:macos'].modifiers), ['primary', 'alt'])
+  assert.equal(command.defaults['web:linux'], undefined, '不注册 Web/Linux 默认键')
+  assert.deepEqual(Array.from(command.regions), ['page', 'editable', 'terminal'])
+
+  assert.equal(app.idle(), true)
+  assert.equal(app.runShortcut(), true)
+  assert.equal(app.idle(), false, '快捷键进入 CHAT')
+  await flush()
+  assert.equal(app.runShortcut(), true)
+  assert.equal(app.idle(), true, '再按一次切回对话')
+})
+
+test('快捷键服务缺失或形状不符：静默跳过', () => {
+  const noInject = mount()
+  assert.equal(noInject.shortcutCommands().length, 0)
+  const missing = mount({ activity: { rows: [] } })
+  assert.equal(missing.shortcutCommands().length, 0)
+  const invalid = mount({ shortcuts: 'invalid' })
+  assert.equal(invalid.shortcutCommands().length, 0)
+})
+
+test('快捷键注册冲突：apply 不抛错且不注册', () => {
+  const app = mount({ shortcuts: { conflict: true } })
+  assert.equal(app.shortcutCommands().length, 0)
+  assert.notEqual(app.switcher(), null, '插件节点照常挂载')
+})
+
+test('卸载时注销快捷键命令', () => {
+  const app = mount({ shortcuts: {} })
+  assert.equal(app.shortcutDisposals().length, 0)
+  app.unmount()
+  assert.deepEqual(app.shortcutDisposals(), ['deepseek-chat.toggle'])
 })
 
 test('切到 CHAT：拉 config、整窗口接管、加载代理地址', async () => {

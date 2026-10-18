@@ -1,7 +1,7 @@
 /**
  * @local/dsh-deepseek-chat — Host 侧插件（TypeScript 源码）。
  *
- * 两个职责：
+ * 三个职责：
  *  1. 在 dsh web 的 HTTP 服务上注册 /dsh-deepseek-chat/config 路由，
  *     告诉客户端 iframe 该指向哪里。
  *  2. 启动一个仅监听 127.0.0.1 的 HTTP 反向代理，整域转发
@@ -10,6 +10,8 @@
  *     （去 Domain / Secure，适配 http loopback 与 Safari）与 Location，
  *     并改写字首屏 <script> 的属性（见 rewriteShellHtml）。其余响应体原样
  *     透传，SSE 流式逐块转发。
+ *  3. 在 /dsh-deepseek-chat/activity 上提供 SSE，推送 DeepSeek 是否正在
+ *     流式生成（见 createActivityHub）。
  *
  * 构建产物是 lib/index.js（ESM，node 内置模块保持外部引用）。
  */
@@ -155,8 +157,87 @@ function rewriteLocation(value: string, target: URL, proxyOrigin: string): strin
   return value;
 }
 
+/** SSE 心跳间隔：每 15s 一条注释行，让中间层知道连接还活着。 */
+const HEARTBEAT_MS = 15_000;
+
+/** 一帧状态事件：`data: {"streaming":true|false}` 后跟空行。 */
+function stateFrame(streaming: boolean): string {
+  return `data: ${JSON.stringify({ streaming })}\n\n`;
+}
+
+/**
+ * 流式活动状态中枢：activeStreams 计数、/activity 的 SSE 订阅者与心跳。
+ *
+ * track() 打开一条流并返回一次性 release：计数 0→1 广播 streaming:true，
+ * 1→0 广播 streaming:false；release 重复调用只减一次。
+ */
+interface ActivityHub {
+  track(): () => void;
+  subscribe(res: ServerResponse): void;
+  dispose(): void;
+}
+
+function createActivityHub(): ActivityHub {
+  let activeStreams = 0;
+  const subscribers = new Set<ServerResponse>();
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+
+  const writeToAll = (chunk: string): void => {
+    for (const res of subscribers) {
+      if (res.writableEnded || res.destroyed) continue;
+      res.write(chunk);
+    }
+  };
+
+  const stopHeartbeat = (): void => {
+    if (heartbeat === null) return;
+    clearInterval(heartbeat);
+    heartbeat = null;
+  };
+
+  const drop = (res: ServerResponse): void => {
+    subscribers.delete(res);
+    if (subscribers.size === 0) stopHeartbeat();
+  };
+
+  return {
+    track() {
+      activeStreams += 1;
+      if (activeStreams === 1) writeToAll(stateFrame(true));
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        activeStreams -= 1;
+        if (activeStreams === 0) writeToAll(stateFrame(false));
+      };
+    },
+    subscribe(res) {
+      res.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-store',
+        connection: 'keep-alive',
+      });
+      subscribers.add(res);
+      res.write(stateFrame(activeStreams > 0));
+      res.on('close', () => drop(res));
+      res.on('error', () => drop(res));
+      if (heartbeat === null) {
+        heartbeat = setInterval(() => writeToAll(': ping\n\n'), HEARTBEAT_MS);
+      }
+    },
+    dispose() {
+      stopHeartbeat();
+      for (const res of subscribers) {
+        if (!res.writableEnded && !res.destroyed) res.end();
+      }
+      subscribers.clear();
+    },
+  };
+}
+
 /** 核心代理处理器：req/res 来自本地 server，经连接池转发到 target。 */
-function proxyRequest(target: URL, agent: UpstreamAgent, proxyOrigin: string, req: IncomingMessage, res: ServerResponse): void {
+function proxyRequest(target: URL, agent: UpstreamAgent, proxyOrigin: string, activity: ActivityHub, req: IncomingMessage, res: ServerResponse): void {
   const upstreamUrl = new URL(req.url ?? '/', target);
   const headers: Record<string, string | string[]> = {};
   for (const [key, value] of Object.entries(req.headers)) {
@@ -180,6 +261,14 @@ function proxyRequest(target: URL, agent: UpstreamAgent, proxyOrigin: string, re
   if (wantsHtml) headers['accept-encoding'] = 'identity'; // HTML 可能要改写，勿压缩
 
   const upstream = upstreamRequest(upstreamUrl, { method: req.method, headers, timeout: 0 }, agent, (up) => {
+    const contentType = String(up.headers['content-type'] ?? '');
+    const release = contentType.startsWith('text/event-stream') ? activity.track() : null;
+    if (release !== null) {
+      // 上游结束或客户端断开都算这条流收尾；release 只生效一次。
+      up.on('end', release);
+      res.on('close', release);
+    }
+
     // 上游中途断开时响应头可能已经发出，只能结束响应。没有这个监听，
     // IncomingMessage 的 'error' 会冒成未捕获异常，把宿主进程整个打挂。
     up.on('error', (error) => {
@@ -210,7 +299,6 @@ function proxyRequest(target: URL, agent: UpstreamAgent, proxyOrigin: string, re
       outHeaders[key] = value as string | string[];
     }
     outHeaders['content-security-policy'] = FRAME_ANCESTORS;
-    const contentType = String(up.headers['content-type'] ?? '');
     const contentEncoding = String(up.headers['content-encoding'] ?? 'identity');
     if (contentType.startsWith('text/html') && (contentEncoding === 'identity' || contentEncoding === '')) {
       // shell HTML：缓冲改写（去掉 crossorigin/integrity），重算 content-length
@@ -247,12 +335,13 @@ function proxyRequest(target: URL, agent: UpstreamAgent, proxyOrigin: string, re
   req.pipe(upstream);
 }
 
-async function startProxy(config: PluginConfig, log: (msg: string) => void): Promise<{ server: http.Server; agent: UpstreamAgent; origin: string }> {
+async function startProxy(config: PluginConfig, log: (msg: string) => void): Promise<{ server: http.Server; agent: UpstreamAgent; origin: string; activity: ActivityHub }> {
   const target = new URL(config.target ?? DEFAULT_TARGET);
   if (target.protocol !== 'http:' && target.protocol !== 'https:') {
     throw new Error(`DeepSeek 代理只支持 http/https 目标，收到 ${target.protocol}`);
   }
   const agent = createUpstreamAgent(target.protocol);
+  const activity = createActivityHub();
   let server: http.Server | null = null;
   let origin = '';
 
@@ -282,7 +371,7 @@ async function startProxy(config: PluginConfig, log: (msg: string) => void): Pro
   server!.on('connection', (socket) => socket.setNoDelay(true));
   server!.on('request', (req, res) => {
     try {
-      proxyRequest(target, agent, origin, req, res);
+      proxyRequest(target, agent, origin, activity, req, res);
     } catch (error) {
       if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
@@ -290,36 +379,39 @@ async function startProxy(config: PluginConfig, log: (msg: string) => void): Pro
   });
 
   log(`[deepseek-chat] DeepSeek 网页版代理已启动：${origin} -> ${target.origin}`);
-  return { server: server!, agent, origin };
+  return { server: server!, agent, origin, activity };
 }
 
 async function apply(ctx: CordisContext, config: PluginConfig = {}): Promise<void> {
   const log = (msg: string) => ctx.logger?.info(msg);
 
-  const { server, agent, origin } = await startProxy(config, log);
+  const { server, agent, origin, activity } = await startProxy(config, log);
   ctx.effect(() => () => {
+    activity.dispose();
     server.close();
     server.closeAllConnections?.();
     agent.destroy(); // 放空上游连接池
   }, 'deepseek-chat: upstream proxy');
 
-  ctx.effect(() => {
-    ctx.webServer.register({
-      kind: 'prefix',
-      path: '/dsh-deepseek-chat',
-      handler: (req, res) => {
-        // prefix 路由不剥离前缀：req.url 形如 /dsh-deepseek-chat/config
-        const pathname = (req.url ?? '').split('?', 1)[0];
-        if (req.method === 'GET' && (pathname === '/dsh-deepseek-chat' || pathname === '/dsh-deepseek-chat/' || pathname === '/dsh-deepseek-chat/config')) {
-          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(JSON.stringify({ url: origin + '/', target: config.target ?? DEFAULT_TARGET }));
-          return;
-        }
-        res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ error: 'not found' }));
-      },
-    });
-  }, 'deepseek-chat: config route');
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'prefix',
+    path: '/dsh-deepseek-chat',
+    handler: (req, res) => {
+      // prefix 路由不剥离前缀：req.url 形如 /dsh-deepseek-chat/config
+      const pathname = (req.url ?? '').split('?', 1)[0];
+      if (req.method === 'GET' && (pathname === '/dsh-deepseek-chat' || pathname === '/dsh-deepseek-chat/' || pathname === '/dsh-deepseek-chat/config')) {
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+        res.end(JSON.stringify({ url: origin + '/', target: config.target ?? DEFAULT_TARGET }));
+        return;
+      }
+      if (req.method === 'GET' && pathname === '/dsh-deepseek-chat/activity') {
+        activity.subscribe(res);
+        return;
+      }
+      res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: 'not found' }));
+    },
+  }), 'deepseek-chat: config route');
 }
 
-export { apply, inject, name };
+export { apply, createActivityHub, inject, name };

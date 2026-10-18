@@ -8,7 +8,7 @@
 import http from 'node:http'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { apply } from '../lib/index.js'
+import { apply, createActivityHub } from '../lib/index.js'
 
 /** 请求代理，收集完整响应；不跟随重定向。 */
 function request(url, headers = {}) {
@@ -32,10 +32,22 @@ function request(url, headers = {}) {
 function makeContext() {
   const routes = []
   const disposers = []
+  const registered = new Set()
+  let unregistered = 0
   return {
     routes,
     disposers,
-    webServer: { register: (route) => { routes.push(route); return () => {} } },
+    unregistered: () => unregistered,
+    hasRoute: (path) => registered.has(path),
+    webServer: {
+      // 与真实 WebServer 同语义：重复 (kind,path) 抛错，register 返回注销函数。
+      register: (route) => {
+        if (registered.has(route.path)) throw new Error(`webserver: duplicate route "${route.path}"`)
+        registered.add(route.path)
+        routes.push(route)
+        return () => { registered.delete(route.path); unregistered += 1 }
+      },
+    },
     effect: (fn) => {
       const disposer = fn()
       if (typeof disposer === 'function') disposers.push(disposer)
@@ -84,16 +96,111 @@ async function start(upstreamHandler) {
   const config = await invokeRoute(route.handler, { method: 'GET', url: '/dsh-deepseek-chat/config', headers: {} })
   const origin = JSON.parse(config.body).url.replace(/\/$/, '')
 
+  // dsh webServer 替身：真实 http 服务，把请求交给插件注册的 prefix 路由。
+  const web = http.createServer((req, res) => route.handler(req, res))
+  await new Promise((resolve) => web.listen(0, '127.0.0.1', resolve))
+  const webOrigin = `http://127.0.0.1:${web.address().port}`
+
   return {
     origin,
     targetOrigin,
+    webOrigin,
     hits: () => hits,
     async close() {
       for (const dispose of ctx.disposers.splice(0).reverse()) await dispose()
+      web.closeAllConnections()
+      await new Promise((resolve) => web.close(resolve))
       upstream.closeAllConnections()
       await new Promise((resolve) => upstream.close(resolve))
     },
   }
+}
+
+/** 轮询直到 check() 为真；超时抛错，避免测试静默卡住。 */
+function waitUntil(check, timeout = 2000) {
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now()
+    const poll = () => {
+      if (check()) {
+        resolve()
+        return
+      }
+      if (Date.now() - startedAt > timeout) {
+        reject(new Error('等待超时'))
+        return
+      }
+      setTimeout(poll, 5)
+    }
+    poll()
+  })
+}
+
+/** 从 SSE 文本里取出 data 帧的 streaming 序列。 */
+function streamingStates(text) {
+  return [...text.matchAll(/data: (\{[^}]*\})\n\n/g)].map((match) => JSON.parse(match[1]).streaming)
+}
+
+/** 打开 SSE 连接：收集文本分片，连接结束或被销毁时置 ended。 */
+function sseConnect(url) {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const req = http.request(url, { method: 'GET', headers: { accept: 'text/event-stream' } }, (res) => {
+      settled = true
+      res.setEncoding('utf8')
+      const sse = {
+        status: res.statusCode,
+        headers: res.headers,
+        text: '',
+        ended: false,
+        req,
+        res,
+        states() {
+          return streamingStates(sse.text)
+        },
+      }
+      res.on('data', (chunk) => { sse.text += chunk })
+      res.on('end', () => { sse.ended = true })
+      res.on('close', () => { sse.ended = true })
+      res.on('error', () => { sse.ended = true })
+      resolve(sse)
+    })
+    req.on('error', (error) => {
+      if (!settled) reject(error)
+    })
+    req.end()
+  })
+}
+
+/** 假 ServerResponse：记录响应头与写入分片，可手动触发 close。 */
+function fakeResponse() {
+  const listeners = new Map()
+  const res = {
+    head: null,
+    writes: [],
+    writableEnded: false,
+    destroyed: false,
+    writeHead(code, headers) {
+      res.head = { code, headers }
+    },
+    write(chunk) {
+      res.writes.push(String(chunk))
+      return true
+    },
+    end(chunk) {
+      if (chunk !== undefined) res.writes.push(String(chunk))
+      res.writableEnded = true
+    },
+    on(event, listener) {
+      const list = listeners.get(event) ?? []
+      list.push(listener)
+      listeners.set(event, list)
+      return res
+    },
+    emit(event) {
+      for (const listener of listeners.get(event) ?? []) listener()
+    },
+  }
+  return res
 }
 
 test('CSP 只允许本机页面嵌入：外部站点无法把代理塞进 iframe', async () => {
@@ -190,5 +297,175 @@ test('上游中途断开：响应以网络错误结束，不会变成未捕获�
     await new Promise((resolve) => setTimeout(resolve, 100))
   } finally {
     await s.close()
+  }
+})
+
+test('/activity 立即回一帧当前状态，带 SSE 响应头', async () => {
+  const s = await start((_req, res) => { res.writeHead(200); res.end('ok') })
+  const sse = await sseConnect(s.webOrigin + '/dsh-deepseek-chat/activity')
+  try {
+    assert.equal(sse.status, 200)
+    assert.equal(sse.headers['content-type'], 'text/event-stream; charset=utf-8')
+    assert.equal(sse.headers['cache-control'], 'no-store')
+    assert.equal(sse.headers.connection, 'keep-alive')
+    await waitUntil(() => sse.states().length === 1)
+    assert.deepEqual(sse.states(), [false])
+    assert.equal(sse.text, 'data: {"streaming":false}\n\n')
+  } finally {
+    sse.req.destroy()
+    await s.close()
+  }
+})
+
+test('上游 SSE 流打开与结束驱动 streaming 状态', async () => {
+  let upstream
+  const s = await start((_req, res) => {
+    upstream = res
+    res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+    res.write('data: first\n\n')
+  })
+  const sse = await sseConnect(s.webOrigin + '/dsh-deepseek-chat/activity')
+  try {
+    await waitUntil(() => sse.states().length === 1)
+    const pending = request(s.origin + '/api/chat')
+    await waitUntil(() => sse.states().includes(true))
+    upstream.end('data: [DONE]\n\n')
+    await pending
+    await waitUntil(() => sse.states().length >= 3)
+    assert.deepEqual(sse.states(), [false, true, false])
+  } finally {
+    sse.req.destroy()
+    await s.close()
+  }
+})
+
+test('普通 JSON 响应不会进入生成中状态', async () => {
+  const s = await start((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+    res.end('{"ok":true}')
+  })
+  const sse = await sseConnect(s.webOrigin + '/dsh-deepseek-chat/activity')
+  try {
+    await waitUntil(() => sse.states().length === 1)
+    const r = await request(s.origin + '/api/v0/users')
+    assert.equal(r.status, 200)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.deepEqual(sse.states(), [false])
+    assert.equal(s.hits(), 1)
+  } finally {
+    sse.req.destroy()
+    await s.close()
+  }
+})
+
+test('dispose 结束 /activity 连接', async () => {
+  const s = await start((_req, res) => { res.writeHead(200); res.end('ok') })
+  const sse = await sseConnect(s.webOrigin + '/dsh-deepseek-chat/activity')
+  try {
+    await waitUntil(() => sse.states().length === 1)
+    await s.close()
+    await waitUntil(() => sse.ended)
+  } finally {
+    sse.req.destroy()
+  }
+})
+
+test('活动中枢：订阅即写头与首帧，0→1 与 1→0 才广播', () => {
+  const hub = createActivityHub()
+  const res = fakeResponse()
+  try {
+    hub.subscribe(res)
+    assert.deepEqual(res.head, {
+      code: 200,
+      headers: {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-store',
+        connection: 'keep-alive',
+      },
+    })
+    assert.deepEqual(streamingStates(res.writes.join('')), [false])
+
+    const first = hub.track()
+    const second = hub.track()
+    assert.deepEqual(streamingStates(res.writes.join('')), [false, true])
+
+    first()
+    assert.deepEqual(streamingStates(res.writes.join('')), [false, true])
+    second()
+    assert.deepEqual(streamingStates(res.writes.join('')), [false, true, false])
+  } finally {
+    hub.dispose()
+  }
+})
+
+test('每条流的 release 只减一次计数', () => {
+  const hub = createActivityHub()
+  const res = fakeResponse()
+  try {
+    hub.subscribe(res)
+    const release = hub.track()
+    release()
+    release()
+    assert.deepEqual(streamingStates(res.writes.join('')), [false, true, false])
+    const later = hub.track()
+    later()
+    assert.deepEqual(streamingStates(res.writes.join('')), [false, true, false, true, false])
+  } finally {
+    hub.dispose()
+  }
+})
+
+test('订阅者断开后移除，不再接收广播', () => {
+  const hub = createActivityHub()
+  const gone = fakeResponse()
+  try {
+    hub.subscribe(gone)
+    gone.emit('close')
+    const before = gone.writes.length
+    const release = hub.track()
+    release()
+    assert.equal(gone.writes.length, before)
+
+    const live = fakeResponse()
+    hub.subscribe(live)
+    assert.deepEqual(streamingStates(live.writes.join('')), [false])
+  } finally {
+    hub.dispose()
+  }
+})
+
+test('心跳每 15s 一帧，dispose 后停止并结束响应', (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  const hub = createActivityHub()
+  const res = fakeResponse()
+  try {
+    hub.subscribe(res)
+    t.mock.timers.tick(14_999)
+    assert.equal(res.writes.filter((chunk) => chunk === ': ping\n\n').length, 0)
+    t.mock.timers.tick(1)
+    assert.equal(res.writes.filter((chunk) => chunk === ': ping\n\n').length, 1)
+  } finally {
+    hub.dispose()
+  }
+  assert.equal(res.writableEnded, true)
+  t.mock.timers.tick(30_000)
+  assert.equal(res.writes.filter((chunk) => chunk === ': ping\n\n').length, 1)
+})
+
+test('卸载时注销 webServer 路由：路由表不残留', async () => {
+  const upstream = http.createServer((_req, res) => { res.writeHead(200); res.end('ok') })
+  await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve))
+  const ctx = makeContext()
+  try {
+    await apply(ctx, { port: 0, target: `http://127.0.0.1:${upstream.address().port}` })
+    assert.equal(ctx.hasRoute('/dsh-deepseek-chat'), true, '装配后路由已注册')
+
+    for (const dispose of ctx.disposers.splice(0).reverse()) await dispose()
+
+    assert.equal(ctx.hasRoute('/dsh-deepseek-chat'), false, '卸载后路由已移除')
+    assert.equal(ctx.unregistered(), 1, 'register 返回的注销函数被执行')
+  } finally {
+    upstream.closeAllConnections()
+    await new Promise((resolve) => upstream.close(resolve))
   }
 })
