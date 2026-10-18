@@ -113,9 +113,10 @@ const STRIP_RESPONSE_HEADERS = new Set([
  * 上游的 CSP 被整条剥掉了（否则 iframe 进不来），这里补回最小的一条：
  * 只允许本机页面嵌入。否则任何外部站点都能把 127.0.0.1 的代理塞进 iframe，
  * 拿到用户已登录的 chat.deepseek.com 做点击劫持——同源策略挡住了读数据，
- * 但挡不住 UI 覆盖。
+ * 但挡不住 UI 覆盖。DSH desktop 的渲染页走 dsh-app:// 自定义协议，必须
+ * 一并放行，否则桌面端点 CHAT 会被浏览器拦成白屏。
  */
-const FRAME_ANCESTORS = "frame-ancestors 'self' http://127.0.0.1:* http://localhost:* https://127.0.0.1:* https://localhost:*";
+const FRAME_ANCESTORS = "frame-ancestors 'self' http://127.0.0.1:* http://localhost:* https://127.0.0.1:* https://localhost:* dsh-app: dsh:";
 
 /**
  * 去掉 shell HTML 里首屏 <script> 的 `crossorigin` 与 SRI `integrity`。

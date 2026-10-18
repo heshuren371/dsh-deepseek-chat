@@ -211,6 +211,7 @@ test('CSP 只允许本机页面嵌入：外部站点无法把代理塞进 iframe
     assert.match(csp, /frame-ancestors/)
     assert.match(csp, /http:\/\/127\.0\.0\.1:\*/)
     assert.match(csp, /http:\/\/localhost:\*/)
+    assert.match(csp, /dsh-app:/, 'DSH desktop 的 dsh-app:// 渲染页必须能嵌入')
     assert.doesNotMatch(csp, /frame-ancestors 'none'/, '上游那条禁止嵌入的 CSP 不能残留')
   } finally {
     await s.close()
