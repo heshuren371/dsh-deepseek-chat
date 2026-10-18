@@ -51,19 +51,35 @@ interface CordisContext {
 const DEFAULT_TARGET = 'https://chat.deepseek.com';
 const DEFAULT_PORT = 3377;
 
+type UpstreamAgent = http.Agent | https.Agent;
+
 /**
  * 上游连接池：keep-alive 复用 TLS 连接。会话列表、历史消息、SSE 补全都是
- * 小请求，不复用时每次转发都要重做一遍 TCP+TLS 握手，开销会盖过传输本身。
+ * 小请求，不复用时每次转发都要重做一遍握手，开销会盖过传输本身。
+ * 协议跟随 target：线上是 https，本地调试/测试可以指 http。
  */
-function createUpstreamAgent(): https.Agent {
-  return new https.Agent({
+function createUpstreamAgent(protocol: string): UpstreamAgent {
+  const options = {
     keepAlive: true,
     keepAliveMsecs: 30_000,
     maxSockets: 32,
     maxFreeSockets: 8,
     timeout: 60_000,
-    scheduling: 'lifo',
-  });
+    scheduling: 'lifo' as const,
+  };
+  return protocol === 'http:' ? new http.Agent(options) : new https.Agent(options);
+}
+
+/** 按目标协议选 http / https 模块。 */
+function upstreamRequest(
+  url: URL,
+  options: http.RequestOptions,
+  agent: UpstreamAgent,
+  onResponse: (up: IncomingMessage) => void,
+): http.ClientRequest {
+  return url.protocol === 'http:'
+    ? http.request(url, { ...options, agent: agent as http.Agent }, onResponse)
+    : https.request(url, { ...options, agent: agent as https.Agent }, onResponse);
 }
 
 /** 逐跳头：转发前必须剥离（RFC 2616 §13.5.1）。 */
@@ -90,6 +106,14 @@ const STRIP_RESPONSE_HEADERS = new Set([
   // 升级到 https，代理与 GUI 会双双挂掉。
   'strict-transport-security',
 ]);
+
+/**
+ * 上游的 CSP 被整条剥掉了（否则 iframe 进不来），这里补回最小的一条：
+ * 只允许本机页面嵌入。否则任何外部站点都能把 127.0.0.1 的代理塞进 iframe，
+ * 拿到用户已登录的 chat.deepseek.com 做点击劫持——同源策略挡住了读数据，
+ * 但挡不住 UI 覆盖。
+ */
+const FRAME_ANCESTORS = "frame-ancestors 'self' http://127.0.0.1:* http://localhost:* https://127.0.0.1:* https://localhost:*";
 
 /**
  * 去掉 shell HTML 里首屏 <script> 的 `crossorigin` 与 SRI `integrity`。
@@ -132,7 +156,7 @@ function rewriteLocation(value: string, target: URL, proxyOrigin: string): strin
 }
 
 /** 核心代理处理器：req/res 来自本地 server，经连接池转发到 target。 */
-function proxyRequest(target: URL, agent: https.Agent, proxyOrigin: string, req: IncomingMessage, res: ServerResponse): void {
+function proxyRequest(target: URL, agent: UpstreamAgent, proxyOrigin: string, req: IncomingMessage, res: ServerResponse): void {
   const upstreamUrl = new URL(req.url ?? '/', target);
   const headers: Record<string, string | string[]> = {};
   for (const [key, value] of Object.entries(req.headers)) {
@@ -155,7 +179,19 @@ function proxyRequest(target: URL, agent: https.Agent, proxyOrigin: string, req:
   const wantsHtml = String(req.headers['accept'] ?? '').includes('text/html');
   if (wantsHtml) headers['accept-encoding'] = 'identity'; // HTML 可能要改写，勿压缩
 
-  const upstream = https.request(upstreamUrl, { method: req.method, headers, agent, timeout: 0 }, (up) => {
+  const upstream = upstreamRequest(upstreamUrl, { method: req.method, headers, timeout: 0 }, agent, (up) => {
+    // 上游中途断开时响应头可能已经发出，只能结束响应。没有这个监听，
+    // IncomingMessage 的 'error' 会冒成未捕获异常，把宿主进程整个打挂。
+    up.on('error', (error) => {
+      if (res.destroyed || res.writableEnded) return;
+      if (!res.headersSent) {
+        res.writeHead(502, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+        res.end(JSON.stringify({ error: 'upstream stream error' }));
+        return;
+      }
+      res.destroy(error);
+    });
+
     const outHeaders: Record<string, string | string[]> = {};
     for (const [key, value] of Object.entries(up.headers)) {
       if (value === undefined) continue;
@@ -173,6 +209,7 @@ function proxyRequest(target: URL, agent: https.Agent, proxyOrigin: string, req:
       }
       outHeaders[key] = value as string | string[];
     }
+    outHeaders['content-security-policy'] = FRAME_ANCESTORS;
     const contentType = String(up.headers['content-type'] ?? '');
     const contentEncoding = String(up.headers['content-encoding'] ?? 'identity');
     if (contentType.startsWith('text/html') && (contentEncoding === 'identity' || contentEncoding === '')) {
@@ -187,10 +224,6 @@ function proxyRequest(target: URL, agent: https.Agent, proxyOrigin: string, req:
         res.writeHead(up.statusCode ?? 502, outHeaders);
         res.end(body);
       });
-      up.on('error', () => {
-        if (!res.headersSent) res.writeHead(502, { 'content-type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ error: 'upstream stream error' }));
-      });
       return;
     }
     res.writeHead(up.statusCode ?? 502, outHeaders);
@@ -198,19 +231,28 @@ function proxyRequest(target: URL, agent: https.Agent, proxyOrigin: string, req:
   });
 
   upstream.on('error', (error) => {
+    if (res.destroyed) return;
     if (!res.headersSent) {
       res.writeHead(502, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
     }
     res.end(JSON.stringify({ error: `upstream error: ${error.message}` }));
   });
 
-  req.on('aborted', () => upstream.destroy());
+  // 客户端先断开（切页 / 关标签）就别再往上游写了。aborted 在新 Node 上已弃用，
+  // 且不覆盖所有断开路径；close + writableEnded 才准确。
+  res.on('close', () => {
+    if (!res.writableEnded) upstream.destroy();
+  });
+
   req.pipe(upstream);
 }
 
-async function startProxy(config: PluginConfig, log: (msg: string) => void): Promise<{ server: http.Server; agent: https.Agent; origin: string }> {
+async function startProxy(config: PluginConfig, log: (msg: string) => void): Promise<{ server: http.Server; agent: UpstreamAgent; origin: string }> {
   const target = new URL(config.target ?? DEFAULT_TARGET);
-  const agent = createUpstreamAgent();
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+    throw new Error(`DeepSeek 代理只支持 http/https 目标，收到 ${target.protocol}`);
+  }
+  const agent = createUpstreamAgent(target.protocol);
   let server: http.Server | null = null;
   let origin = '';
 

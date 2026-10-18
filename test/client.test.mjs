@@ -5,8 +5,8 @@
  * 窗口，用假的 __ModuleLoader__ 收下注册项，再用假 ctx 跑 apply()。
  *
  * jsdom 不加载 iframe 内容、也复现不了跨源限制，所以断言的是节点与状态
- * （胶囊、覆盖层、iframe.src、遮罩文案、卸载清理）；跨源刷新行为由「产物里
- * 不出现 contentWindow」那条护栏兜底。
+ * （胶囊、覆盖层、iframe.src、遮罩文案、卸载清理）；「产物里不出现
+ * contentWindow」那条护栏守着不读 iframe 的跨源 Location。
  */
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -94,19 +94,21 @@ test('顶部胶囊取代会话视图标签环', () => {
   assert.deepEqual(app.fetches, [], '没切到 CHAT 之前不拉 config')
 
   const css = [...app.doc.querySelectorAll('style')].map(node => node.textContent).join('\n')
-  assert.match(css, /\.dshdc-switch\{position:fixed;z-index:501;top:10px;left:50%/, '胶囊常驻窗口顶部中央')
+  assert.match(css, /\.dshdc-switch\{position:fixed;z-index:501;top:max\(10px,env\(safe-area-inset-top,0px\)\)/, '胶囊常驻窗口顶部中央、避开安全区')
+  assert.match(css, /-webkit-app-region:no-drag/, '桌面端拖拽区里仍可点击')
+  assert.match(css, /@media \(max-width:480px\)/, '窄窗口压缩胶囊')
+  assert.match(css, /@media \(max-width:420px\)/, '更窄的窗口再压一档')
   assert.match(css, /\.dshdc-overlay\{position:fixed;z-index:500;inset:0/, '覆盖层整窗口铺满')
 
   assert.equal(app.doc.querySelector('.dshdc-hint'), null, '没有说明文案节点')
-  assert.equal(app.doc.querySelector('.dshdc-bar'), null, '工具条本身也去掉，不占任何横向条带')
-  assert.equal(app.doc.querySelector('.dshdc-actions').textContent, '', '浮动按钮组不含任何文字')
-  assert.match(css, /\.dshdc-actions\{position:fixed;z-index:501;top:10px;right:46px/, '刷新浮在右上角、与胶囊同层，且钉在原格不贴边')
+  assert.equal(app.doc.querySelector('.dshdc-bar'), null, '没有工具条')
+  assert.equal(app.doc.querySelector('.dshdc-actions'), null, '没有浮动按钮组')
   assert.doesNotMatch(css, /\.dshdc-hint/, '说明文案的样式一并删掉')
   assert.doesNotMatch(css, /\.dshdc-bar/, '工具条的样式一并删掉')
+  assert.doesNotMatch(css, /\.dshdc-actions/, '浮动按钮组的样式一并删掉')
 
   const stage = app.doc.querySelector('.dshdc-stage')
   assert.equal(stage.parentElement, app.overlay(), '覆盖层里只剩舞台，iframe 铺满整个窗口')
-  assert.equal(app.doc.querySelector('.dshdc-actions').parentElement, app.overlay(), '按钮组挂在覆盖层里，随它一起隐身')
 })
 
 test('切到 CHAT：拉 config、整窗口接管、加载代理地址', async () => {
@@ -174,68 +176,24 @@ test('config 失败：覆盖层给出错误与重试', async () => {
   assert.equal(app.retry().disabled, false)
 })
 
-test('刷新按钮：只有图标，文字进 aria-label', async () => {
-  const app = mount()
-  const [, chat] = app.segments()
-  chat.click()
-  await flush()
-
-  const buttons = [...app.doc.querySelectorAll('.dshdc-actions .dshdc-btn.dshdc-iconbtn')]
-  assert.deepEqual(buttons.map(node => node.getAttribute('aria-label')), ['刷新'])
-  assert.deepEqual(buttons.map(node => node.getAttribute('title')), ['刷新'])
-  assert.deepEqual(buttons.map(node => node.textContent), [''], '按钮里没有任何文字')
-  assert.deepEqual(buttons.map(node => node.querySelectorAll('svg').length), [1], '按钮里是一枚 svg 图标')
-  assert.equal(buttons[0].disabled, false)
-})
-
-test('刷新按钮重新导航 iframe', async () => {
-  const app = mount()
-  const [, chat] = app.segments()
-  chat.click()
-  await flush()
-
-  const frame = app.frame()
-  frame.dispatchEvent(new app.window.Event('load'))
-  assert.equal(app.state().hidden, true, '首屏 load 后遮罩撤掉')
-
-  // 记录 src 的写入：刷新必须真的重设 src——浏览器据此重新导航整个文档。
-  const writes = []
-  let current = frame.getAttribute('src')
-  Object.defineProperty(frame, 'src', {
-    configurable: true,
-    get: () => current,
-    set: (next) => { writes.push(next); current = next; frame.setAttribute('src', next) },
-  })
-
-  const button = app.doc.querySelector('.dshdc-actions .dshdc-btn')
-  button.click()
-
-  assert.deepEqual(writes, [PROXY_URL], '刷新 = 重设 src 重新导航到代理地址')
-  assert.equal(app.frame(), frame, '还是同一个 iframe 元素，没有被重建')
-  assert.equal(app.state().hidden, false, '刷新期间盖回加载遮罩')
-  assert.match(app.state().textContent, /正在刷新 DeepSeek 网页版/, '文案切到「正在刷新」')
-
-  frame.dispatchEvent(new app.window.Event('load'))
-  assert.equal(app.state().hidden, true, '重新 load 完撤掉遮罩')
-})
-
 test('回归护栏：客户端不出现跨源会抛 SecurityError 的 contentWindow 访问', () => {
   // iframe 与宿主不同源（DSH 3080 / 代理 3377），contentWindow.location 的
-  // reload() 与 href 都会被浏览器拒绝；刷新只能靠重设 src。
-  assert.doesNotMatch(CLIENT_SOURCE, /contentWindow/, '刷新只能靠重设 src，不能读 iframe 的 Location')
+  // reload() 与 href 都会被浏览器拒绝。
+  assert.doesNotMatch(CLIENT_SOURCE, /contentWindow/, '客户端不读 iframe 的 Location')
 })
 
-test('右上角只有刷新一枚按钮，客户端不调用 window.open', async () => {
+test('界面里没有浮动按钮，客户端不调用 window.open', async () => {
   const app = mount()
   const [, chat] = app.segments()
   chat.click()
   await flush()
 
-  const buttons = [...app.doc.querySelectorAll('.dshdc-actions .dshdc-btn')]
-  assert.equal(buttons.length, 1, '右上角只剩一枚按钮')
-  assert.equal(buttons[0].getAttribute('aria-label'), '刷新', '留下的必须是刷新')
-  assert.equal(app.dictionary['action.openExternal'], undefined, '「在浏览器打开」的文案也从字典里删掉')
-  assert.deepEqual(app.opened, [], '已经没有会调用 window.open 的路径')
+  assert.equal(app.doc.querySelectorAll('.dshdc-actions').length, 0, '没有浮动按钮组')
+  assert.equal(app.doc.querySelectorAll('.dshdc-iconbtn').length, 0, '没有图标按钮')
+  assert.equal(app.doc.querySelectorAll('svg').length, 0, '界面里没有 svg 图标')
+  assert.equal(app.dictionary['action.reload'], undefined, '刷新文案已删')
+  assert.equal(app.dictionary['state.reloading'], undefined, '刷新中文案已删')
+  assert.deepEqual(app.opened, [], '没有会调用 window.open 的路径')
 })
 
 test('Esc 退出 CHAT 模式', async () => {
