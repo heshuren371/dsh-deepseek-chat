@@ -21,7 +21,7 @@ const CONFIG_URL = '/dsh-deepseek-chat/config'
 const PROXY_URL = 'http://127.0.0.1:3377/'
 
 /** 按 lib/client.js 的接口把插件装进一个全新 jsdom 窗口。 */
-function mount({ configOk = true, url = PROXY_URL } = {}) {
+function mount({ configOk = true, url = PROXY_URL, activity = null } = {}) {
   const dom = new JSDOM(
     '<!doctype html><html><head></head><body><div id="root"><main>dsh</main></div></body></html>',
     { url: 'http://127.0.0.1:3080/', runScripts: 'outside-only', pretendToBeVisual: true, virtualConsole: new VirtualConsole() },
@@ -45,6 +45,17 @@ function mount({ configOk = true, url = PROXY_URL } = {}) {
   const mod = registrations[0].factory()
   const dictionary = {}
   const disposers = []
+  const injectDeps = []
+  let unsubscribed = 0
+  let snapshot = new Map(activity?.rows ?? [])
+  const listeners = new Set()
+  const source = {
+    getSnapshot: () => snapshot,
+    subscribe: (fn) => {
+      listeners.add(fn)
+      return () => { unsubscribed += 1; listeners.delete(fn) }
+    },
+  }
   const ctx = {
     effect(fn) {
       const disposer = fn()
@@ -56,13 +67,35 @@ function mount({ configOk = true, url = PROXY_URL } = {}) {
       bind: () => (key) => dictionary[key] ?? key,
     },
   }
+  if (activity !== null) {
+    ctx.inject = (deps, cb) => {
+      injectDeps.push(deps)
+      const scope = {
+        effect(fn) {
+          const disposer = fn()
+          if (typeof disposer === 'function') disposers.push(disposer)
+          return disposer
+        },
+      }
+      if (activity.service !== null) {
+        const key = activity.service ?? 'sessionStatus'
+        scope.uiSession = { [key]: source }
+      }
+      cb(scope)
+    }
+  }
   mod.apply(ctx)
 
   const doc = window.document
   return {
-    window, doc, mod, ctx, fetches, opened, dictionary,
+    window, doc, mod, ctx, fetches, opened, dictionary, injectDeps,
     /** 顶部胶囊的两个分段：[对话, CHAT]。 */
     segments: () => [...doc.querySelectorAll('.dshdc-switch .dshdc-seg')],
+    switcher: () => doc.querySelector('.dshdc-switch'),
+    dot: () => doc.querySelector('.dshdc-dot'),
+    unsubscribed: () => unsubscribed,
+    /** 替换活动快照并通知订阅者。 */
+    emit: (rows) => { snapshot = new Map(rows); for (const fn of [...listeners]) fn() },
     overlay: () => doc.querySelector('.dshdc-overlay'),
     /** 覆盖层是否收起（收起用 visibility，不用 display:none）。 */
     idle: () => doc.querySelector('.dshdc-overlay').hasAttribute('data-idle'),
@@ -109,6 +142,123 @@ test('顶部胶囊取代会话视图标签环', () => {
 
   const stage = app.doc.querySelector('.dshdc-stage')
   assert.equal(stage.parentElement, app.overlay(), '覆盖层里只剩舞台，iframe 铺满整个窗口')
+})
+
+test('胶囊空闲只露当前段，悬停或聚焦时展开', async () => {
+  const app = mount()
+  const css = [...app.doc.querySelectorAll('style')].map(node => node.textContent).join('\n')
+  const [dsh, chat] = app.segments()
+
+  assert.equal(app.segments().length, 2, '两段都留在 DOM 里')
+  assert.equal(dsh.getAttribute('aria-pressed'), 'true', '默认停在对话段')
+  assert.equal(chat.getAttribute('aria-pressed'), 'false')
+  assert.equal(app.doc.querySelector('.dshdc-switch').getAttribute('aria-label'), '视图切换')
+  assert.equal(dsh.tabIndex, 0, '当前段可 Tab 到')
+  assert.equal(chat.tabIndex, 0, '收起段仍留在 Tab 顺序里')
+
+  assert.match(css, /\.dshdc-switch\{[^}]*gap:0/, '收起时两段间隙归零')
+  assert.match(css, /\.dshdc-switch:hover,\.dshdc-switch:focus-within\{gap:var\(--dshdc-open-gap\)\}/, '悬停与聚焦恢复间隙')
+  assert.match(css, /\.dshdc-switch\{[^}]*align-items:center/, '状态点与分段在胶囊里垂直居中')
+  assert.match(css, /\.dshdc-seg\{[^}]*transition:max-width 150ms ease,opacity 150ms ease,padding 150ms ease/, '折叠/展开走 150ms 过渡')
+  assert.match(css, /\.dshdc-seg\{[^}]*overflow:hidden/, '过渡期间裁掉溢出的文字')
+
+  const collapsed = css.match(/\.dshdc-seg\[aria-pressed='false'\]\{[^}]*\}/)?.[0] ?? ''
+  assert.match(collapsed, /max-width:0/, '收起段最大宽度归零')
+  assert.match(collapsed, /padding:0/)
+  assert.match(collapsed, /opacity:0/)
+  assert.doesNotMatch(collapsed, /(?:^|[;{])width:/, '宽度只由 max-width 驱动')
+  assert.doesNotMatch(collapsed, /display:none|visibility:hidden/, '收起段不退出可访问树')
+
+  const expanded = css.match(/\.dshdc-switch:hover \.dshdc-seg\[aria-pressed='false'\][^{]*\{[^}]*\}/)?.[0] ?? ''
+  assert.match(expanded, /max-width:160px/)
+  assert.match(expanded, /opacity:1/)
+  assert.doesNotMatch(expanded, /(?:^|[;{])width:/, '展开同样只由 max-width 驱动，收起与展开对称')
+  assert.match(expanded, /\.dshdc-switch:focus-within \.dshdc-seg\[aria-pressed='false'\]/, '聚焦同样触发展开')
+
+  chat.click()
+  await flush()
+  assert.equal(app.segments().length, 2, '切换模式不增删分段')
+  assert.equal(chat.getAttribute('aria-pressed'), 'true')
+  assert.equal(dsh.getAttribute('aria-pressed'), 'false')
+  assert.equal(app.doc.querySelector('.dshdc-switch').getAttribute('aria-label'), '视图切换', 'aria-label 不随模式变化')
+})
+
+test('没有 ctx.inject 的旧 runtime：状态点隐藏且不抛错', () => {
+  const app = mount()
+  const dot = app.dot()
+  assert.equal(dot.hidden, true)
+  assert.equal(dot.dataset.state, '')
+  assert.equal(dot.getAttribute('aria-hidden'), 'true')
+  assert.equal(app.switcher().getAttribute('aria-label'), '视图切换')
+  assert.equal(app.unsubscribed(), 0)
+})
+
+test('DSH 运行中：胶囊里出现脉动状态点', () => {
+  const app = mount({
+    activity: { rows: [['s1', { running: true, completionUnread: false }]] },
+  })
+  const dot = app.dot()
+  assert.equal(dot.hidden, false)
+  assert.equal(dot.dataset.state, 'running')
+  assert.equal(app.switcher().getAttribute('aria-label'), '视图切换 · DSH 运行中')
+  assert.deepEqual(app.injectDeps.map(deps => Array.from(deps)), [['uiSession']], '只走可选子 fiber，模块导出的 inject 不变')
+
+  const css = [...app.doc.querySelectorAll('style')].map(node => node.textContent).join('\n')
+  assert.match(css, /\.dshdc-dot[^{]*\{[^}]*width:0;height:6px;margin-right:0[^}]*opacity:0[^}]*transition:width 150ms ease,margin-right 150ms ease,opacity 150ms ease/)
+  assert.match(css, /\.dshdc-dot\[data-state='running'\]\{[^}]*width:6px;margin-right:6px;opacity:1;animation:dshdc-pulse 1\.6s/, '运行中脉动')
+  assert.match(css, /\.dshdc-dot\[data-state='approval'\]\{[^}]*background:var\(--dsw-alias-state-warn-primary\)/, '待审批用强调色常亮')
+})
+
+test('活动快照更新：状态点随订阅切换，胶囊不重建', () => {
+  const app = mount({
+    activity: { rows: [['s1', { running: true, completionUnread: false }]] },
+  })
+  const dot = app.dot()
+  const switcher = app.switcher()
+  const [dsh, chat] = app.segments()
+
+  app.emit([['s1', { running: false, pendingInteraction: { kind: 'approval' }, completionUnread: true }]])
+
+  assert.equal(app.dot(), dot, '状态点节点不重建')
+  assert.equal(app.switcher(), switcher, '胶囊节点不重建')
+  assert.equal(app.segments()[0], dsh)
+  assert.equal(app.segments()[1], chat)
+  assert.equal(dot.dataset.state, 'approval')
+  assert.equal(switcher.getAttribute('aria-label'), '视图切换 · DSH 待审批')
+})
+
+test('question 互动不算待审批：状态点保持隐藏', () => {
+  const app = mount({
+    activity: { rows: [['s1', { running: false, pendingInteraction: { kind: 'question' }, completionUnread: true }]] },
+  })
+  assert.equal(app.dot().hidden, true)
+  assert.equal(app.dot().dataset.state, '')
+  assert.equal(app.switcher().getAttribute('aria-label'), '视图切换')
+})
+
+test('uiSession 服务缺失：静默降级为无状态点', () => {
+  const app = mount({ activity: { service: null } })
+  assert.equal(app.dot().hidden, true)
+  assert.equal(app.switcher().getAttribute('aria-label'), '视图切换')
+  assert.equal(app.unsubscribed(), 0)
+})
+
+test('老版本只有 pendingInteractions：仍能提示待审批', () => {
+  const app = mount({
+    activity: { service: 'pendingInteractions', rows: [['s1', { pendingInteraction: { kind: 'approval' } }]] },
+  })
+  assert.equal(app.dot().hidden, false)
+  assert.equal(app.dot().dataset.state, 'approval')
+  assert.equal(app.switcher().getAttribute('aria-label'), '视图切换 · DSH 待审批')
+})
+
+test('卸载时退订活动状态源', () => {
+  const app = mount({
+    activity: { rows: [['s1', { running: true, completionUnread: false }]] },
+  })
+  assert.equal(app.unsubscribed(), 0)
+  app.unmount()
+  assert.equal(app.unsubscribed(), 1)
 })
 
 test('切到 CHAT：拉 config、整窗口接管、加载代理地址', async () => {
