@@ -35,7 +35,15 @@ dsh plugin --profile web add github:heshuren371/dsh-deepseek-chat
 
 重启 `dsh web`，刷新浏览器——窗口顶部中央出现〔对话 | CHAT〕胶囊即成功。
 
-想锁定版本：`dsh plugin --profile web add github:heshuren371/dsh-deepseek-chat#v0.2.0`
+想锁定版本：`dsh plugin --profile web add github:heshuren371/dsh-deepseek-chat#v0.3.0`
+
+## 更新 / Update
+
+```bash
+dsh plugin --profile web update @local/dsh-deepseek-chat
+```
+
+更新后重启 `dsh web` / `dsh desktop`。从 GitHub 安装的实例按 `package.json` 的 version 判断有没有新版本——所以每次发布都必须递增版本号并打 tag，否则更新面板只会显示「有新提交（未发版）」而拿不到改动。
 
 ## 开发者安装（克隆 + link）
 
