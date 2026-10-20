@@ -16,7 +16,8 @@ chat.deepseek.com 带有 `content-security-policy: frame-ancestors 'none'`，浏
    - 静态资源本来就在 CDN（fe-static.deepseek.com），API 全是相对路径 `/api/v0/...`，无 WebSocket——整域代理即可完整工作。
    - 在 DSH 的 HTTP 服务上另开 `GET /dsh-deepseek-chat/activity`（SSE）：代理侧按上游响应的 `text/event-stream` 统计活跃流，0↔1 变化时推送 `{"streaming":true|false}`，每 15s 一条心跳；客户端据此显示「生成中」。
 2. **客户端**：在 `document.body` 上挂一枚 `position:fixed` 的胶囊〔对话 | CHAT〕（z-index 501）与一个整窗口覆盖层（z-index 500，盖住全部三列含左侧会话栏）：
-   - 覆盖层不留任何条带：iframe 铺满整个窗口，界面上只剩顶部中央的〔对话 \| CHAT〕胶囊（`position:fixed`，z-index 501）。胶囊落在窗口顶部 48px 的 chrome 带里，居中避开页面顶栏两侧控件；桌面端显式 `-webkit-app-region:no-drag`，位于窗口拖拽区上方也能点；视口 ≤480px / ≤420px 自动收窄——对「☰ + 文字标 + 分享 + 头像」的顶栏实测，375px 起两侧无交叠，320px 以下不保证；
+   - 覆盖层不留任何条带：iframe 铺满整个窗口，界面上只剩顶部中央的〔对话 \| CHAT〕胶囊（`position:fixed`，z-index 501）。胶囊落在窗口顶部 48px 的 chrome 带里，居中避开页面顶栏两侧控件；视口 ≤480px / ≤420px 自动收窄——对「☰ + 文字标 + 分享 + 头像」的顶栏实测，375px 起两侧无交叠，320px 以下不保证；
+   - 桌面端：`-webkit-app-region:no-drag` 让浮层可点；**Windows 桌面端顶部 40px 是原生标题栏＋窗口拖拽区**（Electron 按几何合成拖拽区，浮层落在带内点击会被拿去拖窗口），因此胶囊整体下移到标题栏之下，全屏时保持原位；
    - 胶囊空闲时只露当前模式那一段，鼠标悬停或键盘聚焦时展开成〔对话 \| CHAT〕两段；收起的那段仍留在 DOM 与 Tab 顺序里，读屏可读；
    - 胶囊左侧的活动点是 DSH 侧状态，四态：蓝色脉动 = 有任务在跑，琥珀色常亮 = 有审批待处理，绿色常亮 = 任务完成待查看（`aria-label` 同步）。它订阅 DSH 客户端的 `uiSession.sessionStatus`；在 CHAT 模式下点这个点可直接切回「对话」，服务不存在时静默不显示；
    - DeepSeek 正在生成时胶囊外圈有一道 1px 呼吸环（来自 Host 的 `/activity` SSE）；尊重 `prefers-reduced-motion`——系统开启「减弱动态效果」后环变静态、脉动与过渡全部取消，窗口不在前台时也暂停脉动；

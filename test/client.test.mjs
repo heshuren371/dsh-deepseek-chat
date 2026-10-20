@@ -176,7 +176,8 @@ test('顶部胶囊取代会话视图标签环', () => {
 
   const css = [...app.doc.querySelectorAll('style')].map(node => node.textContent).join('\n')
   assert.match(css, /\.dshdc-switch\{position:fixed;z-index:501;top:max\(10px,env\(safe-area-inset-top,0px\)\)/, '胶囊常驻窗口顶部中央、避开安全区')
-  assert.match(css, /-webkit-app-region:no-drag/, '桌面端拖拽区里仍可点击')
+  assert.match(css, /-webkit-app-region:no-drag/, '浮层声明 no-drag')
+  assert.match(css, /html\[data-windows-titlebar\]:not\(\[data-fullscreen\]\) \.dshdc-switch\{top:calc\(var\(--dsh-windows-titlebar-height,40px\) \+ 8px\)\}/, 'Windows 标题栏拖拽区下移，避免点击被吞')
   assert.match(css, /@media \(max-width:480px\)/, '窄窗口压缩胶囊')
   assert.match(css, /@media \(max-width:420px\)/, '更窄的窗口再压一档')
   assert.match(css, /\.dshdc-overlay\{position:fixed;z-index:500;inset:0/, '覆盖层整窗口铺满')
