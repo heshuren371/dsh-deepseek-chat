@@ -120,7 +120,10 @@ window.__ModuleLoader__.load({
       // 胶囊落在窗口顶部 chrome 带里（macOS 48px 安全区 / Windows 标题栏），居中
       // 不碰两侧控件；空闲只露 aria-pressed="true" 那一段，另一段收成零宽但不出
       // DOM、不退 Tab 顺序，悬停或 :focus-within 时两段一起展开。
-      ".dshdc-switch{position:fixed;z-index:501;top:max(10px,env(safe-area-inset-top,0px));left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:0;--dshdc-open-gap:2px;transition:gap 150ms ease;padding:3px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;background:var(--dsw-alias-bg-layer-1);box-shadow:0 1px 2px #00000012,0 6px 18px #00000012;user-select:none;-webkit-user-select:none;-webkit-app-region:no-drag}",
+      ".dshdc-switch{position:fixed;z-index:501;top:max(10px,env(safe-area-inset-top,0px));left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:0;--dshdc-open-gap:2px;transition:gap 150ms ease;padding:3px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;background:var(--dsw-alias-bg-layer-1);box-shadow:0 1px 2px #00000012,0 6px 18px #00000012;user-select:none;-webkit-user-select:none;-webkit-app-region:no-drag;touch-action:none;cursor:grab}",
+      // 拖动中换成抓取光标；不引入任何位移动画。
+      ".dshdc-switch[data-dragging]{cursor:grabbing}",
+      ".dshdc-switch[data-dragging] .dshdc-seg,.dshdc-switch[data-dragging] .dshdc-dot{cursor:grabbing}",
       // Windows 桌面端顶部 40px 是原生标题栏 + 窗口拖拽区（titleBarOverlay 加
       // .frame::before 的 drag）。Electron 按几何合成拖拽区、不认 z-index，浮层
       // 落在带内点击会被拿去拖窗口，所以整枚胶囊下移到标题栏之下——与 DSH
@@ -523,12 +526,162 @@ window.__ModuleLoader__.load({
         };
         onVisibilityChange();
 
+        /**
+         * 胶囊可拖动。指针按下后移动超过 4px 才进入拖动；拖动期间用 pointer
+         * capture 接管指针，经过 iframe 也不丢事件；没移动就松开则照常点击分段。
+         * 位置存「中心 x + 顶边 y」，窗口变化时重新夹回可视区。Windows 桌面端
+         * 顶部是窗口拖拽区，位置永不进入该带——进去就再也点不到。
+         */
+        const POS_STORAGE = "dshdc.capsule.position";
+        type DragState = {
+          pointerId: number | undefined;
+          startX: number;
+          startY: number;
+          originX: number;
+          originY: number;
+          moved: boolean;
+        };
+        let drag: DragState | null = null;
+        let swallowClick = false;
+
+        const windowsBand = (): number => {
+          const root = document.documentElement;
+          if (!root.hasAttribute("data-windows-titlebar") || root.hasAttribute("data-fullscreen")) return 0;
+          const raw = Number.parseFloat(getComputedStyle(root).getPropertyValue("--dsh-windows-titlebar-height"));
+          return Number.isFinite(raw) ? raw : 40;
+        };
+
+        const clampPosition = (centerX: number, top: number): { x: number; y: number } => {
+          const rect = switcher.getBoundingClientRect();
+          const half = rect.width / 2;
+          const minY = windowsBand();
+          return {
+            x: Math.min(Math.max(centerX, half), Math.max(half, window.innerWidth - half)),
+            y: Math.min(Math.max(top, minY), Math.max(minY, window.innerHeight - rect.height)),
+          };
+        };
+
+        const placeCapsule = (centerX: number, top: number): void => {
+          const next = clampPosition(centerX, top);
+          switcher.style.left = `${next.x}px`;
+          switcher.style.top = `${next.y}px`;
+        };
+
+        const rememberCapsule = (): void => {
+          try {
+            const rect = switcher.getBoundingClientRect();
+            localStorage.setItem(POS_STORAGE, JSON.stringify({ x: rect.left + rect.width / 2, y: rect.top }));
+          } catch {
+            // 存不了就只在本次会话生效
+          }
+        };
+
+        const restoreCapsule = (): void => {
+          try {
+            const raw = localStorage.getItem(POS_STORAGE);
+            if (raw === null) return;
+            const saved = JSON.parse(raw) as { x?: unknown; y?: unknown };
+            if (typeof saved.x === "number" && typeof saved.y === "number") placeCapsule(saved.x, saved.y);
+          } catch {
+            // 数据损坏时用默认位置
+          }
+        };
+
+        const onPointerDown = (event: PointerEvent): void => {
+          if (event.button !== 0) return;
+          const rect = switcher.getBoundingClientRect();
+          drag = {
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            originX: rect.left + rect.width / 2,
+            originY: rect.top,
+            moved: false,
+          };
+          swallowClick = false;
+          if (typeof switcher.setPointerCapture === "function" && event.pointerId !== undefined) {
+            try {
+              switcher.setPointerCapture(event.pointerId);
+            } catch {
+              // 指针已失效，按普通点击处理
+            }
+          }
+        };
+
+        const onPointerMove = (event: PointerEvent): void => {
+          if (drag === null || event.pointerId !== drag.pointerId) return;
+          const dx = event.clientX - drag.startX;
+          const dy = event.clientY - drag.startY;
+          if (!drag.moved) {
+            if (Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+            drag.moved = true;
+            switcher.dataset.dragging = "";
+          }
+          placeCapsule(drag.originX + dx, drag.originY + dy);
+        };
+
+        const onPointerEnd = (event: PointerEvent): void => {
+          if (drag === null || event.pointerId !== drag.pointerId) return;
+          const moved = drag.moved;
+          drag = null;
+          if (
+            typeof switcher.hasPointerCapture === "function"
+            && typeof switcher.releasePointerCapture === "function"
+            && event.pointerId !== undefined
+          ) {
+            try {
+              if (switcher.hasPointerCapture(event.pointerId)) switcher.releasePointerCapture(event.pointerId);
+            } catch {
+              // 已经释放
+            }
+          }
+          delete switcher.dataset.dragging;
+          if (!moved) return;
+          swallowClick = true;
+          rememberCapsule();
+        };
+
+        /** 拖动结束后浏览器仍会补一个 click，吞掉它，避免误切模式。 */
+        const onClickCapture = (event: MouseEvent): void => {
+          if (!swallowClick) return;
+          swallowClick = false;
+          event.stopPropagation();
+          event.preventDefault();
+        };
+
+        /** 窗口尺寸变化后把胶囊夹回可视区，避免拖到窗口外找不回来。 */
+        const onWindowResize = (): void => {
+          if (switcher.style.left === "" && switcher.style.top === "") return;
+          const rect = switcher.getBoundingClientRect();
+          placeCapsule(rect.left + rect.width / 2, rect.top);
+        };
+
+        /** 右键把胶囊放回默认位置，并清掉记忆。 */
+        const onContextMenu = (event: MouseEvent): void => {
+          event.preventDefault();
+          try {
+            localStorage.removeItem(POS_STORAGE);
+          } catch {
+            // 存不了就不用清
+          }
+          switcher.style.left = "";
+          switcher.style.top = "";
+        };
+
         dshSeg.addEventListener("click", leave);
         chatSeg.addEventListener("click", enter);
         dot.addEventListener("click", leave);
         retryBtn.addEventListener("click", load);
         window.addEventListener("keydown", onKeyDown);
         document.addEventListener("visibilitychange", onVisibilityChange);
+        switcher.addEventListener("pointerdown", onPointerDown);
+        switcher.addEventListener("pointermove", onPointerMove);
+        switcher.addEventListener("pointerup", onPointerEnd);
+        switcher.addEventListener("pointercancel", onPointerEnd);
+        switcher.addEventListener("click", onClickCapture, true);
+        switcher.addEventListener("contextmenu", onContextMenu);
+        window.addEventListener("resize", onWindowResize);
+        restoreCapsule();
         notify = render;
         render();
 
@@ -544,6 +697,13 @@ window.__ModuleLoader__.load({
           retryBtn.removeEventListener("click", load);
           window.removeEventListener("keydown", onKeyDown);
           document.removeEventListener("visibilitychange", onVisibilityChange);
+          switcher.removeEventListener("pointerdown", onPointerDown);
+          switcher.removeEventListener("pointermove", onPointerMove);
+          switcher.removeEventListener("pointerup", onPointerEnd);
+          switcher.removeEventListener("pointercancel", onPointerEnd);
+          switcher.removeEventListener("click", onClickCapture, true);
+          switcher.removeEventListener("contextmenu", onContextMenu);
+          window.removeEventListener("resize", onWindowResize);
           setInert(false);
           host.remove();
           style.remove();

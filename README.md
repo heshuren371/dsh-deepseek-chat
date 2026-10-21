@@ -19,6 +19,7 @@ chat.deepseek.com 带有 `content-security-policy: frame-ancestors 'none'`，浏
    - 覆盖层不留任何条带：iframe 铺满整个窗口，界面上只剩顶部中央的〔对话 \| CHAT〕胶囊（`position:fixed`，z-index 501）。胶囊落在窗口顶部 48px 的 chrome 带里，居中避开页面顶栏两侧控件；视口 ≤480px / ≤420px 自动收窄——对「☰ + 文字标 + 分享 + 头像」的顶栏实测，375px 起两侧无交叠，320px 以下不保证；
    - 桌面端：`-webkit-app-region:no-drag` 让浮层可点；**Windows 桌面端顶部 40px 是原生标题栏＋窗口拖拽区**（Electron 按几何合成拖拽区，浮层落在带内点击会被拿去拖窗口），因此胶囊整体下移到标题栏之下，全屏时保持原位；
    - 胶囊空闲时只露当前模式那一段，鼠标悬停或键盘聚焦时展开成〔对话 \| CHAT〕两段；收起的那段仍留在 DOM 与 Tab 顺序里，读屏可读；
+   - 胶囊可拖动：按住拖到窗口任意位置，位置记在 `localStorage` 里跨刷新保留；拖动不会误触分段切换，指针经过嵌入页面也不丢；窗口缩放时自动夹回可视区，Windows 桌面端不会进入标题栏拖拽带。右键胶囊回到默认位置；
    - 胶囊左侧的活动点是 DSH 侧状态，四态：蓝色脉动 = 有任务在跑，琥珀色常亮 = 有审批待处理，绿色常亮 = 任务完成待查看（`aria-label` 同步）。它订阅 DSH 客户端的 `uiSession.sessionStatus`；在 CHAT 模式下点这个点可直接切回「对话」，服务不存在时静默不显示；
    - DeepSeek 正在生成时胶囊外圈有一道 1px 呼吸环（来自 Host 的 `/activity` SSE）；尊重 `prefers-reduced-motion`——系统开启「减弱动态效果」后环变静态、脉动与过渡全部取消，窗口不在前台时也暂停脉动；
    - 快捷键 `Cmd/Ctrl+Alt+J` 切换「对话 / CHAT」（命令 id `deepseek-chat.toggle`，可在 DSH 设置里改键；Linux 浏览器版因组合键白名单不含该键，需自行绑定）；它监听宿主页面，焦点在嵌入的 iframe 内时按不到，主要用于从「对话」进入 CHAT；

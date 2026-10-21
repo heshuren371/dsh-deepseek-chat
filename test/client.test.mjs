@@ -21,12 +21,15 @@ const CONFIG_URL = '/dsh-deepseek-chat/config'
 const PROXY_URL = 'http://127.0.0.1:3377/'
 
 /** 按 lib/client.js 的接口把插件装进一个全新 jsdom 窗口。 */
-function mount({ configOk = true, url = PROXY_URL, activity = null, shortcuts = null, sse = null } = {}) {
+function mount({ configOk = true, url = PROXY_URL, activity = null, shortcuts = null, sse = null, storage = null } = {}) {
   const dom = new JSDOM(
     '<!doctype html><html><head></head><body><div id="root"><main>dsh</main></div></body></html>',
     { url: 'http://127.0.0.1:3080/', runScripts: 'outside-only', pretendToBeVisual: true, virtualConsole: new VirtualConsole() },
   )
   const { window } = dom
+  if (storage !== null) {
+    for (const [key, value] of Object.entries(storage)) window.localStorage.setItem(key, value)
+  }
   const fetches = []
   const opened = []
   window.fetch = async (target) => {
@@ -158,6 +161,29 @@ function mount({ configOk = true, url = PROXY_URL, activity = null, shortcuts = 
 
 /** 让 fetch 的 promise 链跑完。 */
 const flush = () => new Promise(resolve => setTimeout(resolve, 0))
+
+/** 给元素桩一个确定的布局矩形（jsdom 不做布局）；写进 style 的 left/top 会被模拟成真实布局。 */
+function stubRect(node, rect) {
+  node.getBoundingClientRect = () => {
+    const width = rect.width
+    const height = rect.height
+    // 胶囊用 translateX(-50%) 居中，style.left 记的是中心 x。
+    const left = node.style.left === '' ? rect.left : Number.parseFloat(node.style.left) - width / 2
+    const top = node.style.top === '' ? rect.top : Number.parseFloat(node.style.top)
+    return { left, top, width, height, x: left, y: top, right: left + width, bottom: top + height, toJSON() {} }
+  }
+}
+
+/** 伪造一次指针事件：jsdom 没有 PointerEvent，用 MouseEvent 带上坐标。 */
+function pointer(win, type, x, y, target) {
+  target.dispatchEvent(new win.MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 }))
+}
+
+/** 固定视口尺寸。 */
+function setViewport(win, width, height) {
+  Object.defineProperty(win, 'innerWidth', { configurable: true, value: width })
+  Object.defineProperty(win, 'innerHeight', { configurable: true, value: height })
+}
 
 test('顶部胶囊取代会话视图标签环', () => {
   const app = mount()
@@ -611,4 +637,94 @@ test('收起态不许动 DOM：只用 visibility 隐身', () => {
   assert.match(css, /\.dshdc-overlay\[data-idle\]\{visibility:hidden;pointer-events:none\}/)
   assert.doesNotMatch(css, /\.dshdc-overlay\[hidden\]/, 'display:none 之外，更不能用搬 DOM 的方式收起')
   assert.doesNotMatch(css, /data-parked/, '不存在把 iframe 挪回 body 的样式')
+})
+
+test('胶囊拖动样式：抓取光标 + touch-action', () => {
+  const app = mount()
+  const css = [...app.doc.querySelectorAll('style')].map(node => node.textContent).join('\n')
+  assert.match(css, /\.dshdc-switch\{[^}]*touch-action:none[^}]*cursor:grab/, '胶囊可拖动')
+  assert.match(css, /\.dshdc-switch\[data-dragging\]\{cursor:grabbing\}/, '拖动中换抓取光标')
+})
+
+test('胶囊可拖动：位移写进 left/top，松手保存位置', () => {
+  const app = mount()
+  setViewport(app.window, 1440, 800)
+  const switcher = app.switcher()
+  stubRect(switcher, { left: 600, top: 10, width: 100, height: 34 })
+
+  pointer(app.window, 'pointerdown', 650, 27, switcher)
+  pointer(app.window, 'pointermove', 652, 29, switcher)
+  assert.equal(switcher.style.left, '', '小于 4px 阈值不算拖动')
+
+  pointer(app.window, 'pointermove', 750, 227, switcher)
+  assert.equal(switcher.style.left, '750px', '中心 x 跟随指针')
+  assert.equal(switcher.style.top, '210px', '顶边 y 跟随指针')
+  assert.equal(switcher.hasAttribute('data-dragging'), true)
+
+  pointer(app.window, 'pointerup', 750, 227, switcher)
+  assert.equal(switcher.hasAttribute('data-dragging'), false)
+  assert.deepEqual(JSON.parse(app.window.localStorage.getItem('dshdc.capsule.position')), { x: 750, y: 210 })
+})
+
+test('拖动松手不会误触分段切换', () => {
+  const app = mount()
+  setViewport(app.window, 1440, 800)
+  const switcher = app.switcher()
+  stubRect(switcher, { left: 600, top: 10, width: 100, height: 34 })
+
+  pointer(app.window, 'pointerdown', 650, 27, switcher)
+  pointer(app.window, 'pointermove', 760, 200, switcher)
+  pointer(app.window, 'pointerup', 760, 200, switcher)
+
+  // 浏览器在拖动结束后补发的 click 落在 CHAT 段上
+  app.segments()[1].dispatchEvent(new app.window.MouseEvent('click', { bubbles: true, cancelable: true }))
+  assert.equal(app.idle(), true, '拖动不切模式')
+
+  app.segments()[1].click()
+  assert.equal(app.idle(), false, '下一次正常点击不受影响')
+})
+
+test('未移动的点击照常切换模式', () => {
+  const app = mount()
+  const switcher = app.switcher()
+  stubRect(switcher, { left: 600, top: 10, width: 100, height: 34 })
+  pointer(app.window, 'pointerdown', 650, 27, switcher)
+  pointer(app.window, 'pointerup', 650, 27, switcher)
+  app.segments()[1].click()
+  assert.equal(app.idle(), false)
+})
+
+test('拖动位置夹在可视区内，且不进 Windows 标题栏拖拽带', () => {
+  const app = mount()
+  setViewport(app.window, 1440, 800)
+  const switcher = app.switcher()
+  stubRect(switcher, { left: 600, top: 48, width: 100, height: 34 })
+  app.doc.documentElement.setAttribute('data-windows-titlebar', '')
+
+  pointer(app.window, 'pointerdown', 650, 65, switcher)
+  pointer(app.window, 'pointermove', -500, -500, switcher)
+  assert.equal(switcher.style.left, '50px', '左边贴住视口（中心 = 半宽）')
+  assert.equal(switcher.style.top, '40px', '不会进入 40px 标题栏带')
+
+  app.doc.documentElement.setAttribute('data-fullscreen', '')
+  pointer(app.window, 'pointermove', -500, -800, switcher)
+  assert.equal(switcher.style.top, '0px', '全屏没有拖拽带')
+})
+
+test('重启后恢复上次拖到的位置', () => {
+  const app = mount({ storage: { 'dshdc.capsule.position': JSON.stringify({ x: 220, y: 160 }) } })
+  assert.equal(app.switcher().style.left, '220px')
+  assert.equal(app.switcher().style.top, '160px')
+})
+
+test('右键胶囊回到默认位置并清掉记忆', () => {
+  const app = mount({ storage: { 'dshdc.capsule.position': JSON.stringify({ x: 220, y: 160 }) } })
+  const switcher = app.switcher()
+  assert.equal(switcher.style.left, '220px')
+
+  switcher.dispatchEvent(new app.window.MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
+
+  assert.equal(switcher.style.left, '', '清掉内联位置')
+  assert.equal(switcher.style.top, '')
+  assert.equal(app.window.localStorage.getItem('dshdc.capsule.position'), null)
 })
