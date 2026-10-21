@@ -587,6 +587,12 @@ window.__ModuleLoader__.load({
           }
         };
 
+        /** 拖动期间让嵌入页面对命中测试透明，父页面才收得到 pointermove。 */
+        const setFrameHitTesting = (enabled: boolean): void => {
+          if (persistent === null) return;
+          persistent.frame.style.pointerEvents = enabled ? "" : "none";
+        };
+
         const onPointerDown = (event: PointerEvent): void => {
           if (event.button !== 0) return;
           const rect = switcher.getBoundingClientRect();
@@ -599,13 +605,7 @@ window.__ModuleLoader__.load({
             moved: false,
           };
           swallowClick = false;
-          if (typeof switcher.setPointerCapture === "function" && event.pointerId !== undefined) {
-            try {
-              switcher.setPointerCapture(event.pointerId);
-            } catch {
-              // 指针已失效，按普通点击处理
-            }
-          }
+          setFrameHitTesting(false);
         };
 
         const onPointerMove = (event: PointerEvent): void => {
@@ -616,6 +616,15 @@ window.__ModuleLoader__.load({
             if (Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
             drag.moved = true;
             switcher.dataset.dragging = "";
+            // 捕获只能在这时做：按下就捕获会把随后的 click 重定向到胶囊容器，
+            // 分段按钮收不到点击。
+            if (typeof switcher.setPointerCapture === "function" && event.pointerId !== undefined) {
+              try {
+                switcher.setPointerCapture(event.pointerId);
+              } catch {
+                // 指针已失效，本轮按普通点击处理
+              }
+            }
           }
           placeCapsule(drag.originX + dx, drag.originY + dy);
         };
@@ -636,6 +645,7 @@ window.__ModuleLoader__.load({
             }
           }
           delete switcher.dataset.dragging;
+          setFrameHitTesting(true);
           if (!moved) return;
           swallowClick = true;
           rememberCapsule();
@@ -675,9 +685,10 @@ window.__ModuleLoader__.load({
         window.addEventListener("keydown", onKeyDown);
         document.addEventListener("visibilitychange", onVisibilityChange);
         switcher.addEventListener("pointerdown", onPointerDown);
-        switcher.addEventListener("pointermove", onPointerMove);
-        switcher.addEventListener("pointerup", onPointerEnd);
-        switcher.addEventListener("pointercancel", onPointerEnd);
+        // 移动与松手挂在 window 上：拖动时指针会离开胶囊，经过嵌入页面或整个窗口。
+        window.addEventListener("pointermove", onPointerMove);
+        window.addEventListener("pointerup", onPointerEnd);
+        window.addEventListener("pointercancel", onPointerEnd);
         switcher.addEventListener("click", onClickCapture, true);
         switcher.addEventListener("contextmenu", onContextMenu);
         window.addEventListener("resize", onWindowResize);
@@ -698,12 +709,13 @@ window.__ModuleLoader__.load({
           window.removeEventListener("keydown", onKeyDown);
           document.removeEventListener("visibilitychange", onVisibilityChange);
           switcher.removeEventListener("pointerdown", onPointerDown);
-          switcher.removeEventListener("pointermove", onPointerMove);
-          switcher.removeEventListener("pointerup", onPointerEnd);
-          switcher.removeEventListener("pointercancel", onPointerEnd);
+          window.removeEventListener("pointermove", onPointerMove);
+          window.removeEventListener("pointerup", onPointerEnd);
+          window.removeEventListener("pointercancel", onPointerEnd);
           switcher.removeEventListener("click", onClickCapture, true);
           switcher.removeEventListener("contextmenu", onContextMenu);
           window.removeEventListener("resize", onWindowResize);
+          setFrameHitTesting(true);
           setInert(false);
           host.remove();
           style.remove();

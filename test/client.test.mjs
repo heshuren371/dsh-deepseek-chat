@@ -728,3 +728,48 @@ test('右键胶囊回到默认位置并清掉记忆', () => {
   assert.equal(switcher.style.top, '')
   assert.equal(app.window.localStorage.getItem('dshdc.capsule.position'), null)
 })
+
+test('普通点击不捕获指针，拖过阈值才捕获（否则 click 会被重定向）', () => {
+  const app = mount()
+  setViewport(app.window, 1440, 800)
+  const switcher = app.switcher()
+  stubRect(switcher, { left: 600, top: 10, width: 100, height: 34 })
+
+  const captured = []
+  switcher.setPointerCapture = (id) => { captured.push(id) }
+  switcher.releasePointerCapture = () => {}
+  switcher.hasPointerCapture = () => true
+
+  const fire = (type, x, y) => {
+    const event = new app.window.MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 })
+    Object.defineProperty(event, 'pointerId', { value: 7 })
+    switcher.dispatchEvent(event)
+  }
+
+  fire('pointerdown', 650, 27)
+  fire('pointerup', 650, 27)
+  assert.deepEqual(captured, [], '普通点击不捕获指针，分段按钮才收得到 click')
+
+  fire('pointerdown', 650, 27)
+  fire('pointermove', 760, 200)
+  assert.deepEqual(captured, [7], '拖动开始才捕获')
+  fire('pointerup', 760, 200)
+})
+
+test('拖动期间嵌入页面对命中测试透明，松手恢复', async () => {
+  const app = mount()
+  const switcher = app.switcher()
+  stubRect(switcher, { left: 600, top: 10, width: 100, height: 34 })
+
+  app.segments()[1].click()
+  await flush()
+  const frame = app.frame()
+  assert.notEqual(frame, null, 'CHAT 模式挂上了 iframe')
+
+  pointer(app.window, 'pointerdown', 650, 27, switcher)
+  assert.equal(frame.style.pointerEvents, 'none', '否则光标一进 iframe，拖动就断了')
+
+  pointer(app.window, 'pointermove', 760, 200, switcher)
+  pointer(app.window, 'pointerup', 760, 200, switcher)
+  assert.equal(frame.style.pointerEvents, '', '松手恢复命中测试')
+})
