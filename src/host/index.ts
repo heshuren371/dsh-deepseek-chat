@@ -18,6 +18,7 @@
 import http from 'node:http';
 import https from 'node:https';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { Duplex } from 'node:stream';
 
 /** Cordis 插件标识，用于 Loader 诊断。 */
 const name = 'deepseek-chat';
@@ -125,10 +126,21 @@ const FRAME_ANCESTORS = "frame-ancestors 'self' http://127.0.0.1:* http://localh
  * 「页面资源加载异常」。属性去掉后按普通跨源 classic script 加载，字节不变。
  * 后续 webpack chunk 用绝对 publicPath + 普通 script 标签加载，无需处理。
  */
+/**
+ * 朗读引擎把 WebSocket 地址硬编码成 `wss://` + 页面 host；经代理打开页面时用的
+ * 是 http，wss 会对着明文端口做 TLS 握手。垫片只改写同源的 wss，其它地址原样
+ * 放行；它必须先于应用脚本执行，所以插在 head 最前面。
+ */
+const WS_SCHEME_SHIM = `<script>(function(){if(location.protocol!=="http:")return;var Native=window.WebSocket;if(typeof Native!=="function")return;var secure="wss://"+location.host;var plain="ws://"+location.host;function Patched(url,protocols){if(typeof url==="string"&&url.indexOf(secure)===0)url=plain+url.slice(secure.length);return protocols===undefined?new Native(url):new Native(url,protocols)}Patched.prototype=Native.prototype;var names=["CONNECTING","OPEN","CLOSING","CLOSED"];for(var i=0;i<names.length;i++)Patched[names[i]]=Native[names[i]];window.WebSocket=Patched})();</script>`;
+
 function rewriteShellHtml(html: string): string {
-  return html
+  const rewritten = html
     .replace(/\s+crossorigin(="[^"]*")?/g, '')
     .replace(/\s+integrity="[^"]*"/g, '');
+  const head = /<head[^>]*>/i.exec(rewritten);
+  if (head === null) return WS_SCHEME_SHIM + rewritten;
+  const at = head.index + head[0].length;
+  return rewritten.slice(0, at) + WS_SCHEME_SHIM + rewritten.slice(at);
 }
 
 /**
@@ -336,6 +348,77 @@ function proxyRequest(target: URL, agent: UpstreamAgent, proxyOrigin: string, ac
   req.pipe(upstream);
 }
 
+/** 把上游响应头按原始大小写写回裸 socket。 */
+function rawHead(status: number, message: string, rawHeaders: string[]): string {
+  const lines = [`HTTP/1.1 ${status} ${message}`];
+  for (let i = 0; i < rawHeaders.length; i += 2) lines.push(`${rawHeaders[i]}: ${rawHeaders[i + 1]}`);
+  return `${lines.join('\r\n')}\r\n\r\n`;
+}
+
+/**
+ * 转发 WebSocket 升级：朗读引擎连 `wss://<页面 host>/api/v0/chat/tts/`，页面经
+ * 代理打开时这个 host 就是代理本身。http 服务不处理 upgrade 会直接握手失败。
+ * 升级连接不能进连接池，握手成功后两个方向原样透传。
+ */
+function forwardUpgrade(target: URL, proxyOrigin: string, req: IncomingMessage, socket: Duplex, head: Buffer): void {
+  const upstreamUrl = new URL(req.url ?? '/', target);
+  const headers: Record<string, string | string[]> = {};
+  for (const [key, value] of Object.entries(req.headers)) {
+    if (value === undefined) continue;
+    const lower = key.toLowerCase();
+    if (lower === 'host') continue;
+    if (lower.startsWith('sec-fetch-')) continue;
+    if (lower === 'x-forwarded-for' || lower === 'x-forwarded-host' || lower === 'x-forwarded-proto' || lower === 'forwarded') continue;
+    if (lower === 'origin') { headers['origin'] = target.origin; continue; }
+    if (lower === 'referer') {
+      headers['referer'] = String(value).startsWith(proxyOrigin)
+        ? target.origin + String(value).slice(proxyOrigin.length)
+        : target.origin + '/';
+      continue;
+    }
+    headers[key] = value as string | string[];
+  }
+  headers['host'] = target.host;
+  headers['connection'] = 'Upgrade';
+  headers['upgrade'] = 'websocket';
+
+  const transport = upstreamUrl.protocol === 'http:' ? http : https;
+  const upstream = transport.request({
+    protocol: upstreamUrl.protocol,
+    hostname: upstreamUrl.hostname,
+    port: upstreamUrl.port === '' ? undefined : Number(upstreamUrl.port),
+    path: upstreamUrl.pathname + upstreamUrl.search,
+    method: req.method ?? 'GET',
+    headers,
+    agent: false,
+  });
+
+  upstream.on('upgrade', (upRes, upSocket, upHead) => {
+    socket.write(rawHead(upRes.statusCode ?? 101, upRes.statusMessage ?? 'Switching Protocols', upRes.rawHeaders));
+    if (upHead.byteLength > 0) socket.write(upHead);
+    if (head.byteLength > 0) upSocket.write(head);
+    socket.pipe(upSocket);
+    upSocket.pipe(socket);
+    const destroy = (): void => {
+      socket.destroy();
+      upSocket.destroy();
+    };
+    socket.on('close', destroy);
+    upSocket.on('close', destroy);
+    socket.on('error', destroy);
+    upSocket.on('error', destroy);
+  });
+
+  // 上游拒绝升级：把它的响应原样交回浏览器，让它按自身逻辑报错。
+  upstream.on('response', (upRes) => {
+    socket.write(rawHead(upRes.statusCode ?? 502, upRes.statusMessage ?? 'Bad Gateway', upRes.rawHeaders));
+    upRes.pipe(socket);
+  });
+
+  upstream.on('error', () => socket.destroy());
+  upstream.end();
+}
+
 async function startProxy(config: PluginConfig, log: (msg: string) => void): Promise<{ server: http.Server; agent: UpstreamAgent; origin: string; activity: ActivityHub }> {
   const target = new URL(config.target ?? DEFAULT_TARGET);
   if (target.protocol !== 'http:' && target.protocol !== 'https:') {
@@ -376,6 +459,13 @@ async function startProxy(config: PluginConfig, log: (msg: string) => void): Pro
     } catch (error) {
       if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  server!.on('upgrade', (req, socket, head) => {
+    try {
+      forwardUpgrade(target, origin, req, socket, head);
+    } catch {
+      socket.destroy();
     }
   });
 

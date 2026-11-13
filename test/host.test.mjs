@@ -6,6 +6,7 @@
  * 以及上游中途断开不会冒成未捕获异常。
  */
 import http from 'node:http'
+import net from 'node:net'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { apply, createActivityHub } from '../lib/index.js'
@@ -279,7 +280,9 @@ test('shell HTML 去掉 crossorigin / integrity，content-length 重算', async 
   try {
     const r = await request(s.origin + '/', { accept: 'text/html' })
     assert.equal(r.status, 200)
-    assert.equal(r.body, '<html><script src="/a.js"></script></html>')
+    assert.doesNotMatch(r.body, /crossorigin|integrity/, '去掉 crossorigin / integrity')
+    assert.match(r.body, /<script src="\/a\.js"><\/script><\/html>$/)
+    assert.match(r.body, /^<script>\(function\(\)\{if\(location\.protocol!=="http:"\)return/, '垫片在最前面注入')
     assert.equal(Number(r.headers['content-length']), Buffer.byteLength(r.body))
   } finally {
     await s.close()
@@ -468,5 +471,81 @@ test('卸载时注销 webServer 路由：路由表不残留', async () => {
   } finally {
     upstream.closeAllConnections()
     await new Promise((resolve) => upstream.close(resolve))
+  }
+})
+
+test('WebSocket 升级转发到上游：改写 Host/Origin，双向透传', async () => {
+  const seen = []
+  const sockets = new Set()
+  const upstream = http.createServer((_req, res) => { res.writeHead(404); res.end() })
+  upstream.on('connection', (socket) => {
+    sockets.add(socket)
+    socket.on('close', () => sockets.delete(socket))
+  })
+  upstream.on('upgrade', (req, socket) => {
+    seen.push(req.headers)
+    socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n')
+    socket.on('data', (chunk) => socket.write(chunk))
+  })
+  await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve))
+  const upstreamPort = upstream.address().port
+
+  const ctx = makeContext()
+  await apply(ctx, { port: 0, target: `http://127.0.0.1:${upstreamPort}` })
+  const route = ctx.routes.find((entry) => entry.path === '/dsh-deepseek-chat')
+  const config = await invokeRoute(route.handler, { method: 'GET', url: '/dsh-deepseek-chat/config', headers: {} })
+  const origin = new URL(JSON.parse(config.body).url)
+
+  const socket = net.connect(Number(origin.port), '127.0.0.1')
+  const chunks = []
+  socket.on('data', (chunk) => chunks.push(chunk))
+  await new Promise((resolve) => socket.once('connect', resolve))
+  socket.write([
+    'GET /api/v0/chat/tts/?ticket=abc&format=pcm HTTP/1.1',
+    `Host: ${origin.host}`,
+    'Upgrade: websocket',
+    'Connection: Upgrade',
+    'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+    'Sec-WebSocket-Version: 13',
+    `Origin: ${origin.origin}`,
+    '',
+    '',
+  ].join('\r\n'))
+
+  await waitUntil(() => Buffer.concat(chunks).includes('\r\n\r\n'))
+  assert.match(Buffer.concat(chunks).toString('utf8'), /^HTTP\/1\.1 101 /)
+  assert.equal(seen.length, 1, '上游收到升级请求')
+  assert.equal(seen[0].host, `127.0.0.1:${upstreamPort}`, 'Host 改写成上游')
+  assert.equal(seen[0].origin, `http://127.0.0.1:${upstreamPort}`, 'Origin 改写成上游')
+  assert.equal(seen[0]['sec-websocket-key'], 'dGhlIHNhbXBsZSBub25jZQ==')
+  assert.equal(seen[0].upgrade, 'websocket')
+
+  chunks.length = 0
+  socket.write('ping')
+  await waitUntil(() => Buffer.concat(chunks).toString('utf8').includes('ping'))
+  socket.destroy()
+
+  for (const dispose of ctx.disposers.splice(0).reverse()) await dispose()
+  // 升级后的 socket 不归 closeAllConnections 管，显式销毁，否则 close 回调永远不触发。
+  for (const socket of sockets) socket.destroy()
+  upstream.closeAllConnections()
+  await new Promise((resolve) => upstream.close(resolve))
+})
+
+test('shell HTML 在 head 最前面注入 WebSocket 协议垫片', async () => {
+  const s = await start((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    res.end('<!doctype html><html><head><title>DeepSeek</title><script src="/a.js"></script></head><body></body></html>')
+  })
+  try {
+    const r = await request(s.origin + '/')
+    const shim = r.body.indexOf('location.protocol')
+    const title = r.body.indexOf('<title>')
+    assert.ok(shim > 0, '注入了垫片')
+    assert.ok(shim < title, '垫片必须先于应用脚本执行')
+    assert.match(r.body, /wss:\/\/"\+location\.host/, '同源 wss 改写成 ws')
+    assert.equal(r.headers['content-length'], String(Buffer.byteLength(r.body)))
+  } finally {
+    await s.close()
   }
 })

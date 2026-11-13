@@ -13,7 +13,8 @@ chat.deepseek.com 带有 `content-security-policy: frame-ancestors 'none'`，浏
    - 重写 `Set-Cookie`（去 `Domain` / `Secure` / `Partitioned`，适配 http loopback 与 Safari）与 `Location` 重定向；
    - 改写 shell HTML：去掉首屏两个 `<script>` 的 `crossorigin` + SRI `integrity`（CDN 只放行 deepseek.com 系 Origin，不换掉必触发「页面资源加载异常」）；字节本身不变，SRI 语义无损；
    - 其余响应体**原样透传**，SSE 流式补全逐块转发、无缓冲；上游 TLS keep-alive 连接池复用（热请求省掉整次握手，实测首请求 255ms → 后续 67ms）；本地 socket 关 Nagle，流式分片即达；
-   - 静态资源本来就在 CDN（fe-static.deepseek.com），API 全是相对路径 `/api/v0/...`，无 WebSocket——整域代理即可完整工作。
+   - 静态资源在 CDN（fe-static.deepseek.com），API 全是相对路径 `/api/v0/...`；**朗读**走 `wss://<页面 host>/api/v0/chat/tts/`，代理一并转发 WebSocket 升级（改写 Host / Origin，握手成功后双向透传）；
+   - 页面经代理是 `http:`，而朗读把 WebSocket 地址硬编码成 `wss://`：shell HTML 的 head 最前面注入垫片，把同源 wss 改写成 ws，其余地址（含应用自己的连接）原样放行；
    - 在 DSH 的 HTTP 服务上另开 `GET /dsh-deepseek-chat/activity`（SSE）：代理侧按上游响应的 `text/event-stream` 统计活跃流，0↔1 变化时推送 `{"streaming":true|false}`，每 15s 一条心跳；客户端据此显示「生成中」。
 2. **客户端**：在 `document.body` 上挂一枚 `position:fixed` 的胶囊〔对话 | CHAT〕（z-index 501）与一个整窗口覆盖层（z-index 500，盖住全部三列含左侧会话栏）：
    - 覆盖层不留任何条带：iframe 铺满整个窗口，界面上只剩顶部中央的〔对话 \| CHAT〕胶囊（`position:fixed`，z-index 501）。胶囊落在窗口顶部 48px 的 chrome 带里，居中避开页面顶栏两侧控件；视口 ≤480px / ≤420px 自动收窄——对「☰ + 文字标 + 分享 + 头像」的顶栏实测，375px 起两侧无交叠，320px 以下不保证；
